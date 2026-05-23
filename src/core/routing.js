@@ -1,14 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { getProjectFiles } from '../fs/file-manager.js';
-import { askModel } from './llm.js';
+import { askModel, askLocalModel } from './llm.js';
 import { getSession } from './session.js'; // <-- Добавили доступ к памяти
 
 /**
  * Запрашивает у диспетчера список релевантных файлов для задачи
  */
 export async function determineRelevantFiles(userQuery, targetPath) {
-    console.log('⚡ Диспетчер (Flash) определяет нужные файлы...');
+    console.log('⚡ Диспетчер (Локальная сеть / Gemma 3) определяет нужные файлы...');
     const allFiles = getProjectFiles(targetPath);
     
     // 1. Собираем метаданные файлов для умной маршрутизации
@@ -54,7 +54,8 @@ CRITICAL INSTRUCTIONS:
 `;
 
     try {
-        const response = await askModel(prompt, true); // true — используем Flash-модель
+        // === ВАЖНО: Вызываем ЛОКАЛЬНУЮ модель (Ollama) ===
+        const response = await askLocalModel(prompt); 
         
         // Очищаем ответ от возможного маркдауна
         const cleanJson = response.replace(/```json/g, '').replace(/```/g, '').trim();

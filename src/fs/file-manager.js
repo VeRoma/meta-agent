@@ -86,3 +86,56 @@ export function readFilesContent(filePaths, targetAbsolute) {
     }
     return context;
 }
+
+/**
+ * Генерирует визуальное дерево проекта для контекста LLM
+ * @param {string} targetPath - Путь к проекту
+ * @param {string} agentRootDir - Корневая папка агента
+ * @returns {string} Текстовое представление дерева
+ */
+export function generateProjectTree(targetPath, agentRootDir = process.cwd()) {
+    const absoluteTargetPath = path.resolve(agentRootDir, targetPath);
+    const ig = getIgnoreFilter(agentRootDir);
+
+    if (!fs.existsSync(absoluteTargetPath)) {
+        return `❌ Ошибка: Папка проекта ${absoluteTargetPath} не найдена.`;
+    }
+
+    let tree = `\n📂 СТРУКТУРА ПРОЕКТА (${targetPath}):\n`;
+
+    function walk(currentDir, relativeToTarget = '', indent = '') {
+        const items = fs.readdirSync(currentDir);
+        
+        // Сортируем: сначала папки, потом файлы, по алфавиту
+        items.sort((a, b) => {
+            const isDirA = fs.statSync(path.join(currentDir, a)).isDirectory();
+            const isDirB = fs.statSync(path.join(currentDir, b)).isDirectory();
+            if (isDirA && !isDirB) return -1;
+            if (!isDirA && isDirB) return 1;
+            return a.localeCompare(b);
+        });
+
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const itemRelativePath = relativeToTarget ? path.join(relativeToTarget, item) : item;
+
+            if (ig.ignores(itemRelativePath)) continue;
+
+            const fullPath = path.join(currentDir, item);
+            const isDir = fs.statSync(fullPath).isDirectory();
+            const isLast = i === items.length - 1;
+            
+            const branch = isLast ? '└── ' : '├── ';
+            
+            if (isDir) {
+                tree += `${indent}${branch}📁 ${item}/\n`;
+                walk(fullPath, itemRelativePath, indent + (isLast ? '    ' : '│   '));
+            } else {
+                tree += `${indent}${branch}📄 ${item}\n`;
+            }
+        }
+    }
+
+    walk(absoluteTargetPath);
+    return tree + '\n';
+}

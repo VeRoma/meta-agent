@@ -1,0 +1,21 @@
+{
+  "module": "App",
+  "description": "The root React functional component that serves as the main entry point for the application's user interface.",
+  "keywords": [
+    "react",
+    "frontend",
+    "component",
+    "boilerplate",
+    "javascript"
+  ],
+  "interfaces": {
+    "inputs": [],
+    "exports": [
+      "App"
+    ]
+  },
+  "dependencies": [
+    "react",
+    "./App.css"
+  ]
+}

@@ -1,0 +1,35 @@
+package com.challxbot.service;
+
+import com.challxbot.domain.AppUser;
+import com.challxbot.repository.AppUserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final AppUserRepository appUserRepository;
+
+    @Transactional
+    public AppUser getOrCreateUser(Long telegramId, String username) {
+        return appUserRepository.findByTelegramId(telegramId)
+                .orElseGet(() -> {
+                    AppUser newUser = AppUser.builder()
+                            .telegramId(telegramId)
+                            .username(username)
+                            .score(0)
+                            .build();
+                    return appUserRepository.save(newUser);
+                });
+    }
+
+    @Transactional
+    public void addScore(Long telegramId, int points) {
+        appUserRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            user.setScore(user.getScore() + points);
+            appUserRepository.save(user);
+        });
+    }
+}

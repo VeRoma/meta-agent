@@ -2,18 +2,21 @@ import readline from "readline";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
-import { getProjectFiles, readFilesContent } from "../fs/file-manager.js";
+
+import { getProjectFiles, readFilesContent, generateProjectTree } from "../fs/file-manager.js";
 import {
     initSession,
     appendToSession,
     getSession,
     clearSession,
+    compressSessionIfNeeded,
 } from "../core/session.js";
 import { askModel } from "../core/llm.js";
 import { determineRelevantFiles } from "../core/routing.js";
 import { generateDocumentation, generateIndexes } from '../fs/docs-generator.js';
 import { applyPatches, abortSessionPatches, clearSessionBackups, applyRedoPatches } from '../fs/patcher.js';
-import { runLinter } from '../core/linter.js'; // <-- ИМПОРТ ЛИНТЕРА
+import { runLinter } from '../core/linter.js';
+import { runDevServer, stopDevServer } from './runner.js'; // <-- ИМПОРТ RUNNER
 
 const configPath = path.join(process.cwd(), "agent.config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -77,8 +80,234 @@ async function handleCommand(command) {
             break;
             
         default:
-            console.log("\n⚠️ Unknown command. Available: /save, /index, /abort, /redo, /clear, /editor, /push");
+            console.log("\n⚠️ Unknown command. Available: /run, /stop, /save, /index, /abort, /redo, /clear, /editor, /push");
     }
+}
+
+// === НОВАЯ ФУНКЦИЯ: Основной цикл Агента ===
+export async function processAgentTask(text) {
+    console.log("🤖 Agent is gathering context...");
+    appendToSession("user", text);
+
+    try {
+        // 1. ИСПРАВЛЕНО: Регулярка теперь понимает слеши в путях файлов
+        const mentionRegex = /@([a-zA-Z0-9_.\-\/]+)/g;
+        const mentions = [...text.matchAll(mentionRegex)].map(m => m[1]);
+        const allProjectFiles = getProjectFiles(config.workspace.targetProject);
+        let forcedFiles = [];
+
+        if (mentions.length > 0) {
+            for (const mention of mentions) {
+                const matched = allProjectFiles.find(f => {
+                    const normalizedPath = f.replace(/\\/g, '/');
+                    const base = path.basename(normalizedPath);
+                    const nameWithoutExt = base.replace(/\.[^/.]+$/, "");
+                    // 2. ИСПРАВЛЕНО: Ищем не только по имени, но и по кускам пути
+                    return base === mention || nameWithoutExt === mention || normalizedPath === mention || normalizedPath.endsWith(mention);
+                });
+                
+                if (matched) {
+                    forcedFiles.push(matched);
+                    console.log(`📌 Explicitly included: ${mention}`);
+                } else {
+                    console.log(`⚠️ Mentioned file not found in project: ${mention}`);
+                }
+            }
+        }
+
+        let relevantFiles = await determineRelevantFiles(text, config.workspace.targetProject);
+        relevantFiles = [...new Set([...forcedFiles, ...relevantFiles])];
+
+        if (relevantFiles.length > 0) {
+            console.log(`📂 Files selected for analysis: ${relevantFiles.length}`);
+            relevantFiles.forEach((f) => console.log(`   - ${path.basename(f)}`));
+        }
+
+        let healingAttempts = 0;
+        const maxHealingAttempts = 3;
+
+        while (healingAttempts <= maxHealingAttempts) {
+            const targetAbsolute = path.resolve(process.cwd(), config.workspace.targetProject);
+            const filesContext = readFilesContent(relevantFiles, targetAbsolute);
+            const sessionContext = getSession();
+            const projectTree = generateProjectTree(config.workspace.targetProject);
+
+            const prompt = `
+PROJECT STRUCTURE (Use this to understand architecture and import paths):
+${projectTree}
+
+CODE CONTEXT:
+${filesContext || "No files required."}
+
+CURRENT SESSION:
+${sessionContext}
+
+CRITICAL INSTRUCTIONS (READ CAREFULLY):
+1. You are an autonomous Senior Software Architect and Developer.
+2. You MUST respond ONLY with a valid JSON object. Do not use markdown wrappers like \`\`\`json.
+3. AUTONOMOUS FILE READING: If you need to read a file that is not in the CODE CONTEXT, DO NOT ask the user to copy-paste it! Instead, use "chat" mode and mention the file with an @ prefix (e.g., "@vite.config.ts"). The system will automatically fetch it for you in the next turn.
+4. THE "DO NO HARM" RULE FOR PATCHING: When updating a file, you MUST preserve 100% of the original formatting, indentation, styling (e.g. Tailwind classes), comments, and unrelated logic. NEVER hallucinate, truncate, or simplify existing code. If a file is too complex or monolithic to patch safely without losing formatting, DO NOT offload the mechanical work to the user (e.g., do not ask them to copy-paste snippets). Instead, use "chat" mode to warn the user about the complexity and propose a refactoring plan (e.g., decomposing the file) before implementing the requested feature.
+5. TERMINAL AUTONOMY: Commands in "commandsToRun" are executed AUTOMATICALLY and SYNCHRONOUSLY. DO NOT tell the user to run commands and DO NOT tell them to wait. You handle it automatically.
+6. SERVER MANAGEMENT: If you modified config files (vite.config.ts, etc.) or installed major packages, you MUST restart the dev server automatically by setting "restartServer": true in your JSON response. DO NOT ask the user to restart it.
+7. The "plan" and "message" fields MUST be written in Russian.
+
+Expected JSON format:
+{
+  "mode": "chat" | "patch",
+  "plan": [
+    "1. Анализирую архитектуру и нахожу нужный компонент...",
+    "2. Формирую логику для новой функции...",
+    "3. Пишу безопасный патч для файла..."
+  ],
+  "message": "Detailed response (for chat) OR short action summary (for patch) in Russian.",
+  "filesToUpdate": [
+    {
+      "path": "app/components/FileName.tsx",
+      "content": "// ... entire file content here (not just diff, the FULL file) ..."
+    }
+  ],
+  "filesToDelete": [
+    {
+      "path": "app/components/OldFile.tsx"
+    }
+  ],
+  "commandsToRun": [
+    "npm install three"
+  ],
+  "restartServer": false
+}
+
+Answer the developer's last message:
+`;
+
+            console.log(healingAttempts > 0 ? `🤖 Executor is fixing errors (Attempt ${healingAttempts}/${maxHealingAttempts})...` : "🤖 Executor (Pro) is thinking/coding...");
+            
+            const rawResponse = await askModel(prompt, false);
+            const cleanJson = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+            const parsedResponse = JSON.parse(cleanJson);
+
+            const triggerRestartIfNeeded = () => {
+                if (parsedResponse.restartServer) {
+                    console.log("\n🔄 Агент автономно перезапускает dev-сервер...");
+                    stopDevServer();
+                    runDevServer(config.workspace.targetProject, async (errorLog) => {
+                        console.log(`\n🚨 ВНИМАНИЕ: Сервер выкинул ошибку! Передаю Агенту на авто-исправление...`);
+                        const errorPrompt = `[SYSTEM ERROR] Локальный dev-сервер упал с ошибками компиляции. Проанализируй этот лог, найди проблемный файл и сгенерируй патч с исправлением кода:\n\n${errorLog}`;
+                        await processAgentTask(errorPrompt);
+                        console.log('\n✅ Попытка исправления завершена. Посмотрите логи сервера выше.');
+                        rl.prompt();
+                    });
+                }
+            };
+
+            if (parsedResponse.plan && Array.isArray(parsedResponse.plan) && parsedResponse.plan.length > 0) {
+                console.log(`\n🧠 Agent's Logic & Plan:`);
+                parsedResponse.plan.forEach(step => console.log(`   🔸 ${step}`));
+            }
+
+            if (parsedResponse.mode === 'chat') {
+                console.log(`\n================ AGENT RESPONSE [CHAT] ================`);
+                console.log(parsedResponse.message);
+                console.log("========================================================\n");
+                appendToSession("agent", parsedResponse.message);
+                
+                // 3. ИСПРАВЛЕНО: Авто-подхват файлов, запрошенных самим Агентом
+                const agentMentions = [...parsedResponse.message.matchAll(/@([a-zA-Z0-9_.\-\/]+)/g)].map(m => m[1]);
+                if (agentMentions.length > 0) {
+                    console.log(`\n⚙️ Система автономно загружает запрошенные файлы для Агента...`);
+                    const autoPrompt = `[SYSTEM] Содержимое запрошенных файлов загружено: ${agentMentions.map(m => `@${m}`).join(' ')}. Изучи их и продолжай задачу (используй mode: "patch", если готов писать код).`;
+                    await processAgentTask(autoPrompt);
+                    return; // Завершаем текущий вызов, так как рекурсия всё сделает
+                }
+
+                triggerRestartIfNeeded();
+                break;
+                
+            } else if (parsedResponse.mode === 'patch') {
+                console.log(`\n================ AGENT RESPONSE [PATCH] ================`);
+                console.log(`💡 ${parsedResponse.message}`);
+                console.log("========================================================\n");
+                
+                const toUpdate = parsedResponse.filesToUpdate || [];
+                const toDelete = parsedResponse.filesToDelete || [];
+                const commandsToRun = parsedResponse.commandsToRun || [];
+
+                if (toUpdate.length === 0 && toDelete.length === 0 && commandsToRun.length === 0) {
+                    triggerRestartIfNeeded();
+                    break;
+                }
+
+                if (toUpdate.length > 0 || toDelete.length > 0) {
+                    await applyPatches(config.workspace.targetProject, toUpdate, toDelete);
+                }
+
+                if (commandsToRun.length > 0) {
+                    console.log(`\n⚙️ Agent is executing ${commandsToRun.length} command(s) autonomously:`);
+                    for (const cmd of commandsToRun) {
+                        console.log(`\n   > ${cmd}`);
+                        console.log(`⏳ Running (Auto-approved)...`);
+                        try {
+                            execSync(cmd, { 
+                                stdio: 'inherit', 
+                                cwd: path.resolve(process.cwd(), config.workspace.targetProject) 
+                            });
+                            console.log(`✅ Done.`);
+                            appendToSession("agent", `[COMMAND EXECUTED]: ${cmd}`);
+                        } catch (err) {
+                            console.log(`❌ Command failed.`);
+                            appendToSession("agent", `[COMMAND FAILED]: ${cmd}\nError: ${err.message}`);
+                            break; 
+                        }
+                    }
+                }
+
+                if (toUpdate.length > 0) {
+                    console.log("\n🔍 Checking code quality...");
+                    const lintResult = await runLinter(config.workspace.targetProject, toUpdate);
+
+                    if (lintResult.success) {
+                        console.log("✨ Code is clean! No errors found.");
+                        appendToSession("agent", `[PATCH APPLIED SUCCESSFULLY]: ${parsedResponse.message}`);
+                        triggerRestartIfNeeded();
+                        break; 
+                    } else {
+                        healingAttempts++;
+                        
+                        if (healingAttempts > maxHealingAttempts) {
+                            console.log("❌ Auto-healing failed. Too many attempts. Manual fix required.");
+                            console.log(`\nLinter Output:\n${lintResult.error}\n`);
+                            appendToSession("agent", `[PATCH APPLIED BUT LINTER FAILED]: ${parsedResponse.message}`);
+                            break;
+                        }
+
+                        console.log(`⚠️ Linter found errors. Initiating Auto-Healing...`);
+                        
+                        const absoluteUpdatedPaths = toUpdate.map(f => path.resolve(process.cwd(), config.workspace.targetProject, f.path));
+                        relevantFiles = [...new Set([...relevantFiles, ...absoluteUpdatedPaths])];
+
+                        appendToSession("agent", `[PATCH APPLIED WITH ERRORS]: ${parsedResponse.message}`);
+                        const errorPrompt = `[SYSTEM ERROR] Linter failed on the code you just wrote. Fix these errors and return the corrected files in "patch" mode:\n\n${lintResult.error}`;
+                        appendToSession("user", errorPrompt);
+                    }
+                } else {
+                    console.log("✨ Task completed.");
+                    appendToSession("agent", `[TASK COMPLETED]: ${parsedResponse.message}`);
+                    triggerRestartIfNeeded();
+                    break;
+                }
+
+            } else {
+                console.log(parsedResponse.message || "No message provided.");
+                appendToSession("agent", JSON.stringify(parsedResponse));
+                break;
+            }
+        }
+
+    } catch (error) {
+        console.error("\n❌ Processing error (model might not have returned valid JSON):", error.message);
+    }
+
+    await compressSessionIfNeeded();
 }
 
 function chatLoop() {
@@ -87,7 +316,29 @@ function chatLoop() {
 
         if (text.toLowerCase() === "exit" || text.toLowerCase() === "quit") {
             console.log("👋 Shutting down. See you!");
+            stopDevServer(); // Убиваем сервер при выходе
             rl.close();
+            return;
+        }
+
+        // === ИНТЕГРАЦИЯ УПРАВЛЕНИЯ СЕРВЕРОМ ===
+        if (text === "/stop") {
+            stopDevServer();
+            chatLoop();
+            return;
+        }
+
+        if (text === "/run") {
+            runDevServer(config.workspace.targetProject, async (errorLog) => {
+                console.log(`\n🚨 ВНИМАНИЕ: Сервер выкинул ошибку! Передаю Агенту на авто-исправление...`);
+                const errorPrompt = `[SYSTEM ERROR] Локальный dev-сервер упал с ошибками компиляции. Проанализируй этот лог, найди проблемный файл и сгенерируй патч с исправлением кода:\n\n${errorLog}`;
+                
+                await processAgentTask(errorPrompt);
+                
+                console.log('\n✅ Попытка исправления завершена. Посмотрите логи сервера выше.');
+                rl.prompt(); // Возвращаем приглашение ввода
+            });
+            chatLoop();
             return;
         }
 
@@ -120,192 +371,14 @@ function chatLoop() {
             return;
         }
 
-        if (text.startsWith("/") && text !== "/editor") {
+        if (text.startsWith("/") && text !== "/editor" && text !== "/run" && text !== "/stop") {
             await handleCommand(text);
             chatLoop();
             return;
         }
 
-        console.log("🤖 Agent is gathering context...");
-        appendToSession("user", text);
-
-        try {
-            const mentionRegex = /@([a-zA-Z0-9_.-]+)/g;
-            const mentions = [...text.matchAll(mentionRegex)].map(m => m[1]);
-            const allProjectFiles = getProjectFiles(config.workspace.targetProject);
-            let forcedFiles = [];
-
-            if (mentions.length > 0) {
-                for (const mention of mentions) {
-                    const matched = allProjectFiles.find(f => {
-                        const base = path.basename(f);
-                        const nameWithoutExt = base.replace(/\.[^/.]+$/, "");
-                        return base === mention || nameWithoutExt === mention;
-                    });
-                    
-                    if (matched) {
-                        forcedFiles.push(matched);
-                        console.log(`📌 Explicitly included: ${mention}`);
-                    } else {
-                        console.log(`⚠️ Mentioned file not found in project: ${mention}`);
-                    }
-                }
-            }
-
-            let relevantFiles = await determineRelevantFiles(text, config.workspace.targetProject);
-            relevantFiles = [...new Set([...forcedFiles, ...relevantFiles])];
-
-            if (relevantFiles.length > 0) {
-                console.log(`📂 Files selected for analysis: ${relevantFiles.length}`);
-                relevantFiles.forEach((f) => console.log(`   - ${path.basename(f)}`));
-            }
-
-            // --- ЦИКЛ САМОИСЦЕЛЕНИЯ ---
-            let healingAttempts = 0;
-            const maxHealingAttempts = 3; // Максимум 3 попытки исправить ошибку
-
-            while (healingAttempts <= maxHealingAttempts) {
-                const targetAbsolute = path.resolve(process.cwd(), config.workspace.targetProject);
-                const filesContext = readFilesContent(relevantFiles, targetAbsolute);
-                const sessionContext = getSession();
-
-//                 const prompt = `
-// CODE CONTEXT:
-// ${filesContext || "No files required."}
-
-// CURRENT SESSION:
-// ${sessionContext}
-
-// CRITICAL INSTRUCTIONS:
-// 1. You are an autonomous Senior Software Architect and Developer.
-// 2. You MUST respond ONLY with a valid JSON object. Do not use markdown wrappers like \`\`\`json.
-// 3. Choose your "mode" carefully:
-//    - Use "chat" mode if the user is asking a question, requesting an explanation, planning, or discussing architecture. In this mode, provide your detailed response in "message" (Markdown is allowed here) and leave "filesToUpdate" empty.
-//    - Use "patch" mode ONLY if the user explicitly asks to write, modify, or delete code, OR if you are fixing a SYSTEM ERROR. In this mode, "message" must be a short summary of what you changed, and "filesToUpdate" must contain the full updated file contents.
-// 4. The "message" field MUST be written in Russian.
-
-// Expected JSON format:
-// {
-//   "mode": "chat" | "patch",
-//   "message": "Detailed response (for chat) OR short action summary (for patch) in Russian.",
-//   "filesToUpdate": [
-//     {
-//       "path": "app/components/FileName.tsx",
-//       "content": "// ... entire file content here (not just diff, the FULL file) ..."
-//     }
-//   ]
-// }
-
-// Answer the developer's last message:
-// `;
-
-
-const prompt = `
-CODE CONTEXT:
-${filesContext || "No files required."}
-
-CURRENT SESSION:
-${sessionContext}
-
-CRITICAL INSTRUCTIONS (READ CAREFULLY):
-1. You are an autonomous Senior Software Architect and Developer.
-2. You MUST respond ONLY with a valid JSON object. Do not use markdown wrappers like \`\`\`json.
-3. Choose your "mode" carefully:
-   - Use "chat" mode NOT ONLY for planning and discussing, BUT ALSO if a task is vague, risky, or if you lack the FULL original content of a file in the CODE CONTEXT. If in doubt, ask clarifying questions instead of breaking things.
-   - Use "patch" mode ONLY for clear, specific tasks where you have the full file context.
-4. THE "DO NO HARM" RULE FOR PATCHING: When updating a file, you MUST preserve 100% of the original formatting, indentation, styling (e.g. Tailwind classes), comments, and unrelated logic. NEVER hallucinate, truncate, or simplify existing code. If a file is too complex or monolithic to patch safely without losing formatting, DO NOT offload the mechanical work to the user (e.g., do not ask them to copy-paste snippets). Instead, use "chat" mode to warn the user about the complexity and propose a refactoring plan (e.g., decomposing the file) before implementing the requested feature.
-5. The "message" field MUST be written in Russian.
-
-Expected JSON format:
-{
-  "mode": "chat" | "patch",
-  "message": "Detailed response (for chat) OR short action summary (for patch) in Russian.",
-  "filesToUpdate": [
-    {
-      "path": "app/components/FileName.tsx",
-      "content": "// ... entire file content here (not just diff, the FULL file) ..."
-    }
-  ],
-  "filesToDelete": [
-    {
-      "path": "app/components/OldFile.tsx"
-    }
-  ]
-}
-
-Answer the developer's last message:
-`;
-
-                console.log(healingAttempts > 0 ? `🤖 Executor is fixing errors (Attempt ${healingAttempts}/${maxHealingAttempts})...` : "🤖 Executor (Pro) is thinking/coding...");
-                
-                const rawResponse = await askModel(prompt, false);
-                const cleanJson = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-                const parsedResponse = JSON.parse(cleanJson);
-
-                if (parsedResponse.mode === 'chat') {
-                    console.log(`\n================ AGENT RESPONSE [CHAT] ================`);
-                    console.log(parsedResponse.message);
-                    console.log("========================================================\n");
-                    appendToSession("agent", parsedResponse.message);
-                    break; // Выходим из цикла, так как код не менялся
-                    
-                } else if (parsedResponse.mode === 'patch') {
-                    console.log(`\n================ AGENT RESPONSE [PATCH] ================`);
-                    console.log(`💡 ${parsedResponse.message}`);
-                    console.log("========================================================\n");
-                    
-                    const toUpdate = parsedResponse.filesToUpdate || [];
-                    const toDelete = parsedResponse.filesToDelete || [];
-
-                    if (toUpdate.length > 0 || toDelete.length > 0) {
-                        // Передаем в патчер и файлы для обновления, и файлы для удаления
-                        await applyPatches(config.workspace.targetProject, toUpdate, toDelete);
-                        
-                        console.log("🔍 Checking code quality...");
-                        // Линтеру передаем ТОЛЬКО обновленные файлы (удаленные проверять не нужно)
-                        const lintResult = await runLinter(config.workspace.targetProject, toUpdate);
-
-                        if (lintResult.success) {
-                            console.log("✨ Code is clean! No errors found.");
-                            appendToSession("agent", `[PATCH APPLIED SUCCESSFULLY]: ${parsedResponse.message}`);
-                            break; // Успех! Код чист, выходим из цикла
-                        } else {
-                            healingAttempts++;
-                            
-                            if (healingAttempts > maxHealingAttempts) {
-                                console.log("❌ Auto-healing failed. Too many attempts. Manual fix required.");
-                                console.log(`\nLinter Output:\n${lintResult.error}\n`);
-                                appendToSession("agent", `[PATCH APPLIED BUT LINTER FAILED]: ${parsedResponse.message}`);
-                                break;
-                            }
-
-                            console.log(`⚠️ Linter found errors. Initiating Auto-Healing...`);
-                            
-                            // Добавляем файлы с ошибками в контекст (используем toUpdate вместо старого parsedResponse.filesToUpdate)
-                            const absoluteUpdatedPaths = toUpdate.map(f => path.resolve(process.cwd(), config.workspace.targetProject, f.path));
-                            relevantFiles = [...new Set([...relevantFiles, ...absoluteUpdatedPaths])];
-
-                            // Фиксируем неудачу в истории и отправляем системный промпт
-                            appendToSession("agent", `[PATCH APPLIED WITH ERRORS]: ${parsedResponse.message}`);
-                            const errorPrompt = `[SYSTEM ERROR] Linter failed on the code you just wrote. Fix these errors and return the corrected files in "patch" mode:\n\n${lintResult.error}`;
-                            appendToSession("user", errorPrompt);
-                            // Цикл пойдет на следующий круг с новым errorPrompt
-                        }
-                    } else {
-                        break; // Патч пустой
-                    
-                    }
-                } else {
-                    console.log(parsedResponse.message || "No message provided.");
-                    appendToSession("agent", JSON.stringify(parsedResponse));
-                    break;
-                }
-            } // конец while
-
-        } catch (error) {
-            console.error("\n❌ Processing error (model might not have returned valid JSON):", error.message);
-        }
-
+        // Передаем стандартный ввод в основную функцию Агента
+        await processAgentTask(text);
         chatLoop();
     });
 }

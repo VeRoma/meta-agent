@@ -1,0 +1,146 @@
+package com.challxbot.service;
+
+import com.challxbot.domain.Vocabulary;
+import com.challxbot.repository.VocabularyRepository;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+@Slf4j
+@Service
+public class TelegramBotService extends TelegramLongPollingBot {
+
+    @Value("${telegram.bot.username}")
+    private String botUsername;
+
+    private final TelegramValidationService telegramValidationService;
+    private final VocabularyRepository vocabularyRepository;
+
+    public TelegramBotService(@Value("${telegram.bot.token}") String botToken,
+                              TelegramValidationService telegramValidationService,
+                              VocabularyRepository vocabularyRepository) {
+        super(botToken);
+        this.telegramValidationService = telegramValidationService;
+        this.vocabularyRepository = vocabularyRepository;
+    }
+
+    @Override
+    public String getBotUsername() {
+        return botUsername;
+    }
+
+    @Override
+    public void onUpdateReceived(Update update) {
+        if (update.hasMessage() && update.getMessage().hasText()) {
+            String messageText = update.getMessage().getText();
+            long chatId = update.getMessage().getChatId();
+
+            if (messageText.equals("/start")) {
+                sendMessage(chatId, "Добро пожаловать в квиз по кыргызскому языку! Введите /quiz, чтобы начать.");
+            } else if (messageText.equals("/quiz")) {
+                sendQuizQuestion(chatId);
+            }
+        } else if (update.hasCallbackQuery()) {
+            CallbackQuery callbackQuery = update.getCallbackQuery();
+            long chatId = callbackQuery.getMessage().getChatId();
+            String data = callbackQuery.getData();
+
+            if ("CORRECT".equals(data)) {
+                sendMessage(chatId, "✅ Правильно!");
+            } else if ("WRONG".equals(data)) {
+                sendMessage(chatId, "❌ Ошибка!");
+            }
+
+            // Бесконечный квиз: сразу отправляем следующий вопрос
+            sendQuizQuestion(chatId);
+        }
+    }
+
+    private void sendQuizQuestion(long chatId) {
+        try {
+            // Получаем все слова из словаря (для небольшого словаря это ОК)
+            List<Vocabulary> allWords = vocabularyRepository.findAll();
+            
+            if (allWords.size() < 4) {
+                sendMessage(chatId, "В словаре недостаточно слов для квиза. Пожалуйста, убедитесь, что словарь загружен.");
+                return;
+            }
+
+            // Перемешиваем список для выбора случайных слов
+            Collections.shuffle(allWords);
+
+            // Берем первое слово как правильный ответ
+            Vocabulary correctWord = allWords.get(0);
+            String question = "Как переводится слово: " + correctWord.getWord() + "?";
+            String correctAnswer = correctWord.getTranslation();
+
+            List<AnswerOption> options = new ArrayList<>();
+            options.add(new AnswerOption(correctAnswer, "CORRECT"));
+
+            // Берем следующие 3 слова как ловушки (варианты 1, 2, 3)
+            for (int i = 1; i <= 3; i++) {
+                options.add(new AnswerOption(allWords.get(i).getTranslation(), "WRONG"));
+            }
+
+            // Перемешиваем варианты ответа
+            Collections.shuffle(options);
+
+            // Создаем InlineKeyboardMarkup (1 столбец)
+            InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+            List<List<InlineKeyboardButton>> keyboard = new ArrayList<>();
+            for (AnswerOption option : options) {
+                InlineKeyboardButton button = new InlineKeyboardButton();
+                button.setText(option.text);
+                button.setCallbackData(option.callbackData);
+                List<InlineKeyboardButton> row = new ArrayList<>();
+                row.add(button);
+                keyboard.add(row);
+            }
+            markup.setKeyboard(keyboard);
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("❓ *" + question + "*");
+            message.setParseMode("Markdown");
+            message.setReplyMarkup(markup);
+
+            execute(message);
+
+        } catch (Exception e) {
+            log.error("Ошибка при создании вопроса. Трейс:", e);
+            sendMessage(chatId, "Произошла ошибка при создании вопроса. Попробуйте снова: /quiz");
+        }
+    }
+
+    private void sendMessage(long chatId, String text) {
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText(text);
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error("Не удалось отправить сообщение", e);
+        }
+    }
+
+    private static class AnswerOption {
+        String text;
+        String callbackData;
+
+        AnswerOption(String text, String callbackData) {
+            this.text = text;
+            this.callbackData = callbackData;
+        }
+    }
+}

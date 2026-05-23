@@ -1,38 +1,87 @@
 import fs from 'fs';
 import path from 'path';
+import { askLocalModel } from './llm.js';
 
-const SESSION_FILE = path.join(process.cwd(), '.agent_session.tmp');
+// Функция, которая динамически вычисляет путь к памяти текущего проекта
+function getSessionFile() {
+    const configPath = path.join(process.cwd(), 'agent.config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const targetProjectAbs = path.resolve(process.cwd(), config.workspace.targetProject);
+    const devAgentDir = path.join(targetProjectAbs, '.dev-agent');
+    
+    if (!fs.existsSync(devAgentDir)) {
+        fs.mkdirSync(devAgentDir, { recursive: true });
+    }
+    
+    // Сохраняем как markdown для красивого отображения в Git
+    return path.join(devAgentDir, 'session.md');
+}
+
+const MAX_SESSION_LENGTH = 12000;
 
 export function initSession(taskName) {
-    // Если сессия уже существует (например, после перезапуска сервера), мы ее НЕ стираем!
-    if (fs.existsSync(SESSION_FILE)) {
+    const sessionFile = getSessionFile();
+    if (fs.existsSync(sessionFile)) {
         const restartNote = `\n\n--- 🔄 СЕРВЕР ПЕРЕЗАПУЩЕН: ${taskName} ---\n`;
-        fs.appendFileSync(SESSION_FILE, restartNote, 'utf-8');
-        return fs.readFileSync(SESSION_FILE, 'utf-8');
+        fs.appendFileSync(sessionFile, restartNote, 'utf-8');
+        return fs.readFileSync(sessionFile, 'utf-8');
     }
 
-    // Если файла нет (например, после /save, /clear или /abort), создаем с чистого листа
     const initialContent = `# Сессия: ${taskName}\n**Статус:** В работе\n\n## 🔄 Журнал попыток и диалог\n`;
-    fs.writeFileSync(SESSION_FILE, initialContent, 'utf-8');
+    fs.writeFileSync(sessionFile, initialContent, 'utf-8');
     return initialContent;
 }
 
 export function getSession() {
-    if (!fs.existsSync(SESSION_FILE)) {
-        return null;
-    }
-    return fs.readFileSync(SESSION_FILE, 'utf-8');
+    const sessionFile = getSessionFile();
+    if (!fs.existsSync(sessionFile)) return null;
+    return fs.readFileSync(sessionFile, 'utf-8');
 }
 
 export function appendToSession(role, text) {
-    if (!fs.existsSync(SESSION_FILE)) return;
+    const sessionFile = getSessionFile();
+    if (!fs.existsSync(sessionFile)) return;
     
     const prefix = role === 'user' ? '\n🧑 **Разработчик:** ' : '\n🤖 **Агент:** ';
-    fs.appendFileSync(SESSION_FILE, `${prefix}${text}\n`, 'utf-8');
+    fs.appendFileSync(sessionFile, `${prefix}${text}\n`, 'utf-8');
 }
 
 export function clearSession() {
-    if (fs.existsSync(SESSION_FILE)) {
-        fs.unlinkSync(SESSION_FILE);
+    const sessionFile = getSessionFile();
+    if (fs.existsSync(sessionFile)) {
+        fs.unlinkSync(sessionFile);
+    }
+}
+
+export async function compressSessionIfNeeded() {
+    const sessionFile = getSessionFile();
+    if (!fs.existsSync(sessionFile)) return;
+
+    const content = fs.readFileSync(sessionFile, 'utf-8');
+    if (content.length <= MAX_SESSION_LENGTH) return;
+
+    console.log('\n🧹 Память переполнена. Запускаю быстрое сжатие контекста (Gemma 3)...');
+    
+    const prompt = `You are an AI assistant summarizing a development session.
+Read the following chat history between a Developer and an AI Agent.
+Create a highly concise, structured summary in Russian.
+Include:
+1. The main goal of the current session.
+2. What has been successfully implemented so far.
+3. The current unresolved problem or the last action taken.
+
+Keep it strictly factual and under 1500 characters. DO NOT write code blocks.
+
+CHAT HISTORY:
+${content}
+`;
+
+    try {
+        const summary = await askLocalModel(prompt);
+        const newContent = `# Сжатая сессия\n**Статус:** Контекст был сжат для экономии памяти и защиты от галлюцинаций.\n\n## 📝 Краткое содержание предыдущих действий:\n${summary}\n\n## 🔄 Продолжение диалога:\n`;
+        fs.writeFileSync(sessionFile, newContent, 'utf-8');
+        console.log('✅ Контекст успешно сжат! Продолжаем работу.');
+    } catch (error) {
+        console.error('⚠️ Ошибка при сжатии контекста:', error.message);
     }
 }

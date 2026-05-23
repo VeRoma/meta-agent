@@ -1,0 +1,395 @@
+const fs = require("fs");
+const path = require("path");
+// Подключаем библиотеку для построения ВОГНУТОЙ оболочки
+const concaveman = require('concaveman');
+
+// --- ПУТИ К ФАЙЛАМ ---
+const inputCoordsAndHeightsFilePath = path.join(__dirname, "input.data");   // 
+const inputDataFilePath = path.join(__dirname, "data.data");
+const outputFilePath = path.join(__dirname, "code.gdl");
+const outputMassFilePath = path.join(__dirname, "code-mass.gdl");
+const outputMassTableFilePath = path.join(__dirname, "code-mass-table.gdl");
+const outputAreaFilePath = path.join(__dirname, "code-areas.gdl");
+
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
+const parseGDLCode = (gdlCode) => {
+    if (!gdlCode || gdlCode.length === 0) {
+        console.error("ОШИБКА: Файл data.data пуст.");
+        return;
+    }
+    const text2Lines = gdlCode.filter((line) => line.toLowerCase().includes("text2"));
+    const cleanedLines = text2Lines.map((line) => line.replace(/text2/gi, "").trim());
+
+    if (cleanedLines.length === 0) {
+         console.error("ОШИБКА: Нет строк с text2.");
+         return;
+    }
+
+    let originX = 0;
+    let originY = 0;
+    let foundOrigin = false;
+
+    // Ищем "XX,XX"
+    const originIndex = cleanedLines.findIndex(line => line.includes('"XX,XX"'));
+
+    if (originIndex !== -1) {
+        const line = cleanedLines[originIndex];
+        const match = line.match(/(-?\d+\.\d+),\s?(-?\d+\.\d+)/);
+        if (match) {
+            originX = parseFloat(match[1]);
+            originY = parseFloat(match[2]);
+            foundOrigin = true;
+            console.log(`✅ Найдена точка привязки "XX,XX": X=${originX}, Y=${originY}`);
+            cleanedLines.splice(originIndex, 1);
+        }
+    } 
+    
+    // Если не нашли, берем последнюю
+    if (!foundOrigin) {
+        console.log(`⚠️ Метка "XX,XX" не найдена. Пробуем использовать последнюю строку.`);
+        const lastIndex = cleanedLines.length - 1;
+        const match = cleanedLines[lastIndex].match(/(-?\d+\.\d+),\s?(-?\d+\.\d+)/);
+        if (match) {
+            originX = parseFloat(match[1]);
+            originY = parseFloat(match[2]);
+            foundOrigin = true;
+            console.log(`Использована последняя строка: X=${originX}, Y=${originY}`);
+            cleanedLines.splice(lastIndex, 1);
+        }
+    }
+
+    if (!foundOrigin) {
+        console.error("ОШИБКА: Не удалось определить начало координат.");
+        return;
+    }
+    
+    // --- УМНОЕ ОКРУГЛЕНИЕ ("МАГНИТ") ---
+    cleanedLines.forEach((line, index) => {
+        const match = line.match(/(-?\d+\.\d+),\s?(-?\d+\.\d+)/);
+        if (match) {
+            // 1. Считаем реальную координату
+            let rawX = parseFloat(match[1]) - originX;
+            let rawY = parseFloat(match[2]) - originY;
+
+            // 2. Функция "примагничивания"
+            const snapToGrid = (val) => {
+                const step = 10;
+                const threshold = 0.2; // Порог срабатывания (20 см)
+                const nearestGrid = Math.round(val / step) * step;
+                
+                // Если разница меньше или равна 0.2м, округляем. Иначе оставляем как есть.
+                if (Math.abs(val - nearestGrid) <= threshold) {
+                    return nearestGrid;
+                }
+                return val;
+            };
+
+            const newX = snapToGrid(rawX);
+            const newY = snapToGrid(rawY);
+
+            cleanedLines[index] = line.replace(/(-?\d+\.\d+),\s?(-?\d+\.\d+)/, `${newX.toFixed(2)}, ${newY.toFixed(2)}`);
+        }
+    });
+    
+    fs.writeFileSync(inputCoordsAndHeightsFilePath, cleanedLines.join("\n"));
+};
+
+const getDataFromFile = (filePath) => {
+    try {
+        const data = fs.readFileSync(filePath, "utf8");
+        return data.split("\n").map((row) => row.trim()).filter((row) => row);
+    } catch (error) {
+        console.error(`Ошибка при чтении файла ${filePath}:`, error);
+        return [];
+    }
+};
+
+const parseCoordHeightData = (lines) => {
+    if (!Array.isArray(lines)) return [];
+    const result = [];
+    for (let i = 0; i < lines.length; i += 2) {
+        if (!lines[i + 1]) continue;
+        
+        try {
+            const parts1 = lines[i].split(",");
+            const xCoord = parts1[0].trim();
+            const yCoord = parts1[1].trim();
+            
+            const pHighStr = lines[i].split('"')[1];
+            const eHighStr = lines[i + 1].split('"')[1];
+            
+            if (pHighStr !== undefined && eHighStr !== undefined) {
+                const projected = parseFloat(pHighStr.replace(/,/g, "."));
+                const existing = parseFloat(eHighStr.replace(/,/g, "."));
+                result.push({ x: xCoord, y: yCoord, eHigh: existing, pHigh: projected });
+            }
+        } catch (e) {
+             // ignore
+        }
+    }
+    
+    // Удаляем дубликаты, возникшие в результате "магнитного" округления
+    // Это предотвращает появление нескольких точек в одном углу сетки, что ломает расчет объема
+    const uniqueMap = new Map();
+    for (const p of result) {
+        const key = `${p.x},${p.y}`;
+        if (!uniqueMap.has(key)) {
+            uniqueMap.set(key, p);
+        }
+    }
+    return Array.from(uniqueMap.values());
+};
+
+const createClustersOnGrid = (cornerData) => {
+    const clusters = [];
+    const step = 10;
+    const xValues = cornerData.map((point) => parseFloat(point.x));
+    const yValues = cornerData.map((point) => parseFloat(point.y));
+    const minX = Math.floor(Math.min(...xValues) / step) * step;
+    const maxX = Math.ceil(Math.max(...xValues) / step) * step;
+    const minY = Math.floor(Math.min(...yValues) / step) * step;
+    const maxY = Math.ceil(Math.max(...yValues) / step) * step;
+    for (let x = minX; x < maxX; x += step) {
+        for (let y = maxY; y > minY; y -= step) {
+            const cluster = [{ x: x, y: y }, { x: x + step, y: y }, { x: x, y: y - step }, { x: x + step, y: y - step }];
+            clusters.push(cluster);
+        }
+    }
+    return clusters;
+};
+
+const pointsInClusters = (clusters, cellCornerData) => {
+    const cellsData = Array(clusters.length).fill().map(() => []);
+    for (let i = 0; i < clusters.length; i++) {
+        const xMin = clusters[i][0].x;
+        const xMax = clusters[i][1].x;
+        const yMax = clusters[i][0].y;
+        const yMin = clusters[i][2].y;
+        for (let j = 0; j < cellCornerData.length; j++) {
+            if (
+                cellCornerData[j].x >= xMin && cellCornerData[j].x <= xMax &&
+                cellCornerData[j].y >= yMin && cellCornerData[j].y <= yMax
+            ) {
+                cellsData[i].push({
+                    x: +cellCornerData[j].x,
+                    y: +cellCornerData[j].y,
+                    hDiff: cellCornerData[j].hDiff,
+                });
+            }
+        }
+    }
+    return cellsData;
+};
+
+function getCentroid(points) {
+    let centroid = { x: 0, y: 0 };
+    if (points.length === 0) return centroid;
+    for (const point of points) {
+        centroid.x += point.x;
+        centroid.y += point.y;
+    }
+    centroid.x = +(centroid.x / points.length).toFixed(2);
+    centroid.y = +(centroid.y / points.length).toFixed(2);
+    return centroid;
+}
+
+const calculateArea = (vertices) => {
+    if (!Array.isArray(vertices) || vertices.length < 3) return 0;
+    const pointCoordinates = vertices.map(p => [p.x, p.y]);
+    const orderedPoints = concaveman(pointCoordinates);
+    let area = 0;
+    const n = orderedPoints.length;
+    if (n < 3) return 0;
+    for (let i = 0; i < n; i++) {
+        const p1 = orderedPoints[i];
+        const p2 = orderedPoints[(i + 1) % n];
+        area += p1[0] * p2[1] - p2[0] * p1[1];
+    }
+    return Math.abs(area / 2);
+};
+
+const gdlTable = (gdlTableMass) => {
+    let globalSumPositiveMass = 0;
+    let globalSumNegativeMass = 0;
+    let gdlScriptTable = `! GDL Table of Earthwork Masses\nDEFINE STYLE "TextStyle" "Monospac821 BT Западный", 5, 0\nSET STYLE "TextStyle"\n`;
+
+    if (!gdlTableMass || gdlTableMass.length === 0) return gdlScriptTable;
+
+    const xValues = gdlTableMass.map((point) => point.x);
+    const minX = Math.floor(Math.min(...xValues) / 10) * 10;
+    const maxX = Math.ceil(Math.max(...xValues) / 10) * 10;
+    const step = 10;
+
+    for (let currentX = minX; currentX < maxX; currentX += step) {
+        let positiveColumnMass = 0;
+        let negativeColumnMass = 0;
+        for (const item of gdlTableMass) {
+            if (item.x >= currentX && item.x < currentX + step) {
+                const mass = parseFloat(item.mass);
+                if (mass > 0) {
+                    positiveColumnMass += mass;
+                } else {
+                    negativeColumnMass += mass;
+                }
+            }
+        }
+        gdlScriptTable += `\nTEXT2 ${currentX + step / 2}, 0, "${positiveColumnMass.toFixed(2)}"`;
+        gdlScriptTable += `\nTEXT2 ${currentX + step / 2}, -5, "${Math.abs(negativeColumnMass).toFixed(2)}"`;
+        globalSumPositiveMass += positiveColumnMass;
+        globalSumNegativeMass += negativeColumnMass;
+    }
+
+    gdlScriptTable += `\n! --- TOTAL ---`;
+    gdlScriptTable += `\nTEXT2 ${maxX + step}, 0, "${globalSumPositiveMass.toFixed(2)}"`;
+    gdlScriptTable += `\nTEXT2 ${maxX + step}, -5, "${Math.abs(globalSumNegativeMass).toFixed(2)}"`;
+    return gdlScriptTable;
+};
+
+// --- ФУНКЦИЯ ГЕНЕРАЦИИ С ОТСЛЕЖИВАНИЕМ ИСПОЛЬЗОВАННЫХ ТОЧЕК ---
+const generateGDLCodeCombined = (clustersWithPoints, allPoints) => {
+    const heightStyleHeader = `! Heights Differences\nDEFINE STYLE "TextStyle" "Monospac821 BT Западный", 0.5, 0\nSET STYLE "TextStyle"`;
+    const volumeStyleHeader = `! Earthwork Volumes\nDEFINE STYLE "TextStyle" "Monospac821 BT Западный", 3, 0\nSET STYLE "TextStyle"`;
+    const areaStyleHeader = `! Calculated Areas\nDEFINE STYLE "TextStyle" "Monospac821 BT Западный", 3, 0\nSET STYLE "TextStyle"`;
+    
+    let gdlScript = heightStyleHeader;
+    let gdlMassScript = volumeStyleHeader;
+    let gdlAreaScript = areaStyleHeader;
+    let gdlTableMass = [];
+
+    // Счетчики
+    let countPoints = 0;
+    let countMasses = 0;
+    let countAreas = 0;
+    let skippedEmpty = 0;
+    let skippedTooFewPoints = 0;
+    let skippedZeroArea = 0;
+    
+    const usedPointsSet = new Set();
+    const printedPointsSet = new Set();
+
+    // Гарантированно выводим ВСЕ точки в GDL файл (даже если они не попали в объемный кластер)
+    if (Array.isArray(allPoints)) {
+        for (const point of allPoints) {
+            const pointKey = `${point.x},${point.y}`;
+            if (!printedPointsSet.has(pointKey)) {
+                gdlScript += `\nTEXT2 ${point.x}, ${point.y}, "${point.hDiff.toFixed(2)}"`;
+                countPoints++;
+                printedPointsSet.add(pointKey);
+            }
+        }
+    }
+
+    if (!Array.isArray(clustersWithPoints)) {
+        return { gdlScript, gdlMassScript, gdlAreaScript, gdlTableMass, countPoints, countMasses, usedPointsSet, skippedEmpty, skippedTooFewPoints, skippedZeroArea };
+    }
+
+    for (const cluster of clustersWithPoints) {
+        if (cluster.length < 3) {
+            if (cluster.length === 0) skippedEmpty++;
+            else skippedTooFewPoints++;
+            continue;
+        }
+
+        const area = calculateArea(cluster);
+        if (area === 0) {
+            skippedZeroArea++;
+            continue;
+        }
+
+        const volume = (
+            area *
+            (cluster.reduce((sum, point) => sum + point.hDiff, 0) / cluster.length)
+        ).toFixed(2);
+
+        const centroid = getCentroid(cluster);
+        
+        for (const point of cluster) {
+            const pointKey = `${point.x},${point.y}`;
+            usedPointsSet.add(pointKey); // Отмечаем точки, которые реально участвовали в объемах
+        }
+        
+        gdlMassScript += `\nTEXT2 ${centroid.x}, ${centroid.y}, "${volume}"`;
+        gdlAreaScript += `\nTEXT2 ${centroid.x}, ${centroid.y}, "${area.toFixed(2)}"`;
+        
+        gdlTableMass.push({ x: centroid.x, y: centroid.y, mass: volume });
+        
+        countMasses++;
+        countAreas++;
+    }
+    return { gdlScript, gdlMassScript, gdlAreaScript, gdlTableMass, countPoints, countMasses, usedPointsSet, skippedEmpty, skippedTooFewPoints, skippedZeroArea };
+};
+
+// --- ОСНОВНОЙ АЛГОРИТМ ---
+console.log("Запуск скрипта...");
+
+// 1. Создаем input.data с УМНЫМ ОКРУГЛЕНИЕМ (<= 0.2м)
+parseGDLCode(getDataFromFile(inputDataFilePath));
+
+const coordsAndHeightLines = getDataFromFile(inputCoordsAndHeightsFilePath);
+const coordsAndHeightData = parseCoordHeightData(coordsAndHeightLines);
+
+// 2. Здесь ничего дополнительно не округляем
+const cellCornerData = coordsAndHeightData.map((point) => ({
+    x: parseFloat(point.x),
+    y: parseFloat(point.y),
+    hDiff: +(point.pHigh - point.eHigh).toFixed(2),
+}));
+
+console.log(`>>> ВХОДЯЩИЕ ДАННЫЕ (с учетом округления порога 0.2м и дедупликации): ${coordsAndHeightData.length} точек.`);
+
+const clusters = createClustersOnGrid(cellCornerData);
+const clustersWithPoints = pointsInClusters(clusters, cellCornerData);
+
+const { 
+    gdlScript, 
+    gdlMassScript, 
+    gdlAreaScript, 
+    gdlTableMass,
+    countPoints,
+    countMasses,
+    usedPointsSet, 
+    skippedEmpty,
+    skippedTooFewPoints,
+    skippedZeroArea
+} = generateGDLCodeCombined(clustersWithPoints, cellCornerData);
+
+fs.writeFileSync(outputFilePath, gdlScript, "utf8");
+console.log(`GDL-код (РАЗНИЦА ВЫСОТ) записан.`);
+fs.writeFileSync(outputMassFilePath, gdlMassScript, "utf8");
+console.log(`GDL-код (МАССЫ) записан.`);
+fs.writeFileSync(outputAreaFilePath, gdlAreaScript, "utf8");
+console.log(`GDL-код (ПЛОЩАДИ) записан.`);
+const gdlScriptTable = gdlTable(gdlTableMass);
+fs.writeFileSync(outputMassTableFilePath, gdlScriptTable, "utf8");
+console.log(`GDL-код (ТАБЛИЦА) записан.`);
+
+// --- ВЫВОД ПОДРОБНОЙ СТАТИСТИКИ ---
+console.log(`\n==========================================`);
+console.log(`📊 ПОДРОБНАЯ СТАТИСТИКА`);
+console.log(`==========================================`);
+console.log(`Всего создано ячеек сетки (10x10):   ${clusters.length}`);
+console.log(`Всего уникальных исходных точек:     ${coordsAndHeightData.length}`);
+console.log(`------------------------------------------`);
+console.log(`✅ РАСЧЕТ ВЫПОЛНЕН ДЛЯ:              ${countMasses} ячеек`);
+console.log(`⚠️ ПРОПУЩЕНО ЯЧЕЕК:                  ${clusters.length - countMasses}`);
+console.log(`   - Пустые:                         ${skippedEmpty}`);
+console.log(`   - Мало точек (<3 шт):             ${skippedTooFewPoints}`);
+
+console.log(`\n==========================================`);
+console.log(`🔍 АНАЛИЗ ПОТЕРЯННЫХ ТОЧЕК`);
+console.log(`==========================================`);
+
+const unusedPoints = cellCornerData.filter(p => !usedPointsSet.has(`${p.x},${p.y}`));
+
+if (unusedPoints.length > 0) {
+    console.log(`⚠️ ВНИМАНИЕ: ${unusedPoints.length} точек остались за бортом (вокруг них <3 соседей в квадрате) НО ОНИ ВЫВЕДЕНЫ В GDL ФАЙЛ:`);
+    unusedPoints.forEach((p, idx) => {
+        console.log(`   ${idx + 1}. X: ${p.x.toFixed(2)}, Y: ${p.y.toFixed(2)}`);
+    });
+} else {
+    console.log(`✅ ОТЛИЧНО! Все точки были использованы в расчетах объемов.`);
+}
+
+console.log(`==========================================`);
+console.log("Готово!");

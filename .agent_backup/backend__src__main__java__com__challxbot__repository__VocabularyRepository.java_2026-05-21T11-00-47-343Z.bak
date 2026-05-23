@@ -1,0 +1,10 @@
+package com.challxbot.repository;
+
+import com.challxbot.domain.Vocabulary;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface VocabularyRepository extends JpaRepository<Vocabulary, Long> {
+    boolean existsByWord(String word);
+}
