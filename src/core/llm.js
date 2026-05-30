@@ -35,32 +35,9 @@ export async function askModel(prompt, useDispatcher = false) {
 }
 
 /**
- * Отправляет запрос к ЛОКАЛЬНОЙ модели через Ollama
- * Если Ollama недоступна, бесшовно переключается на облачного Диспетчера (Flash)
+ * Временно отключаем нестабильную локальную модель (Ollama)
+ * и принудительно используем безотказного облачного Диспетчера (Flash)
  */
 export async function askLocalModel(prompt) {
-    const localModelName = config.llm.localModel || 'gemma3:4b';
-    
-    try {
-        const response = await fetch('http://localhost:11434/api/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: localModelName,
-                prompt: prompt,
-                stream: false
-            })
-        });
-
-        if (!response.ok) {
-            throw new Error(`Ollama HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        return data.response;
-        
-    } catch (error) {
-        console.log(`\n⚠️ Локальная модель недоступна (${error.message}). Переключаюсь на облако (Flash)...`);
-        return await askModel(prompt, true);
-    }
+    return await askModel(prompt, true);
 }

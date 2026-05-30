@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { askLocalModel } from './llm.js';
+import { askModel } from './llm.js';
 
 // Функция, которая динамически вычисляет путь к памяти текущего проекта
 function getSessionFile() {
@@ -17,7 +17,7 @@ function getSessionFile() {
     return path.join(devAgentDir, 'session.md');
 }
 
-const MAX_SESSION_LENGTH = 12000;
+const MAX_SESSION_LENGTH = 150000;
 
 export function initSession(taskName) {
     const sessionFile = getSessionFile();
@@ -60,7 +60,7 @@ export async function compressSessionIfNeeded() {
     const content = fs.readFileSync(sessionFile, 'utf-8');
     if (content.length <= MAX_SESSION_LENGTH) return;
 
-    console.log('\n🧹 Память переполнена. Запускаю быстрое сжатие контекста (Gemma 3)...');
+    console.log('\n🧹 Память переполнена. Запускаю быстрое сжатие контекста (Gemini Flash)...');
     
     const prompt = `You are an AI assistant summarizing a development session.
 Read the following chat history between a Developer and an AI Agent.
@@ -77,7 +77,7 @@ ${content}
 `;
 
     try {
-        const summary = await askLocalModel(prompt);
+        const summary = await askModel(prompt, true);
         const newContent = `# Сжатая сессия\n**Статус:** Контекст был сжат для экономии памяти и защиты от галлюцинаций.\n\n## 📝 Краткое содержание предыдущих действий:\n${summary}\n\n## 🔄 Продолжение диалога:\n`;
         fs.writeFileSync(sessionFile, newContent, 'utf-8');
         console.log('✅ Контекст успешно сжат! Продолжаем работу.');

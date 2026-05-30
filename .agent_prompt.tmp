@@ -1,29 +1,17 @@
-"UX/UI Багфикс: Исправляем верстку и очистку чата в TelegramBotService.java.
+Fix Cleanup in onUpdateReceived:
 
-Твоя задача:
+Locate the block where plain text is processed for a dictionary search (when userState is DEFAULT or null).
 
-Запоминание и удаление приветствия: Добавь в класс поле private final Map<Long, Integer> welcomeMessages = new ConcurrentHashMap<>();.
+BEFORE sending the ⏳ Анализирую... message or the DB search result, you MUST explicitly call your cleanup methods (e.g., deleteSessionMessage(chatId) and clearLastMenuMessage(chatId)).
 
-Когда отправляешь /start, сохраняй ID отправленного сообщения: Message msg = execute(new SendMessage(...)); welcomeMessages.put(chatId, msg.getMessageId());
+This ensures that any active quiz question (with its inline keyboard) or open menu is completely deleted from the chat before the dictionary card appears.
 
-Когда обрабатываешь текст "🚀 Учить слова", удаляй не только текущее сообщение юзера (DeleteMessage(chatId, messageId)), но и приветствие: Integer welcomeId = welcomeMessages.remove(chatId); if (welcomeId != null) execute(new DeleteMessage(chatId, welcomeId));
+Preserve User Text:
 
-Широкие кнопки (ОЧЕНЬ ВАЖНО): Ты неправильно собрал клавиатуру. Каждая кнопка должна быть в отдельном списке (ряду). Сделай строго так:
-List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-for (String option : options) {
-    InlineKeyboardButton btn = new InlineKeyboardButton(option.toUpperCase()); // Делаем текст капсом для крупности
-    btn.setCallbackData(...);
-    rows.add(List.of(btn)); // КАЖДАЯ КНОПКА В СВОЕМ РЯДУ!
-}
-rows.add(List.of(endButton)); // Кнопка завершения в своем ряду
+Continue to ensure that the user's incoming text message is NOT deleted.
 
-Верстка текста (в одном сообщении с разделителем):
-Формируй текст строго так:
-🏆 Твой счет: {score} ⭐\n
-[Если previousWord != null:]
-✅ Прошлое: <b>{previousWord.word}</b> — {previousWord.translation}\n
-💡 Пример: Скоро здесь будут примеры использования\n
-➖➖➖➖➖➖➖➖➖➖\n\n
-🔹 <b>{newWord.word}</b> 🔹
+Keep existing logic:
 
-Подготовь патч только для TelegramBotService.java."
+Do not alter the DB search, AI generation, saving, or handleResumeQuiz mechanics.
+
+Do NOT execute any run/start commands. Provide the code patch.

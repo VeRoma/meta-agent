@@ -1,0 +1,44 @@
+spring.application.name=challxbot
+
+# ===================================================================
+# DATABASE (PostgreSQL)
+# ===================================================================
+# Replace 'your_db_name' with the name of your PostgreSQL database.
+spring.datasource.url=jdbc:postgresql://localhost:5432/challxbot_db
+
+# Replace 'your_username' with your PostgreSQL username.
+spring.datasource.username=postgres
+
+# Replace 'your_password' with your PostgreSQL password.
+spring.datasource.password=Fashidoku2905!
+
+spring.datasource.driver-class-name=org.postgresql.Driver
+
+# ===================================================================
+# JPA / HIBERNATE
+# ===================================================================
+# This tells Hibernate to update the database schema on startup (e.g., create missing tables).
+spring.jpa.hibernate.ddl-auto=update
+
+# (Optional) Show SQL queries in the console for debugging.
+spring.jpa.show-sql=true
+
+spring.jpa.open-in-view=false
+
+# ===================================================================
+# TELEGRAM BOT CONFIGURATION
+# ===================================================================
+
+
+telegram.bot.token=8477202301:AAHFdV2nlXWAf0Dlg8jX_Bm_yyuwNChRjCQ
+telegram.bot.name=Chall X Bot
+telegram.bot.username=chall_x_bot
+
+telegram.webapp.url=https://fa3efb1e44c757.lhr.life
+
+#logging.level.org.springframework.web=DEBUG
+
+# Google AI
+google.ai.key=AIzaSyD3O5pRbDwF4BaiOQv2sFLFtFTUVkDYdOg
+# google.ai.url=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent
+google.ai.url=https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent

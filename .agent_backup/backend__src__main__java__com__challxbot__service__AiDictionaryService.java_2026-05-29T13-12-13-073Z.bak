@@ -1,0 +1,92 @@
+package com.challxbot.service;
+
+import com.challxbot.dto.PendingWord;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+@Service
+@Slf4j
+public class AiDictionaryService {
+
+    @Value("${ai.api.key}")
+    private String apiKey;
+
+    private static final String API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s";
+    private final RestTemplate restTemplate = new RestTemplate();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public PendingWord generateDictionaryEntry(String word) {
+        log.info("🤖 AI: Анализирую слово '{}'", word);
+        String prompt = String.format(
+                "Analyze the word '%s'. Determine if it's Kyrgyz (KG) or Russian (RU). Translate it to the other language. Create one short example sentence in Kyrgyz and translate it to Russian. Return ONLY a valid JSON: {\"lang\": \"KG|RU\", \"kgWord\": \"...\", \"ruWord\": \"...\", \"exampleKg\": \"...\", \"exampleRu\": \"...\"}.",
+                word
+        );
+
+        if (apiKey == null || apiKey.isBlank()) {
+            log.error("AI API Key Error");
+            return null;
+        }
+
+        try {
+            String url = String.format(API_URL_TEMPLATE, apiKey);
+            String escapedPrompt = prompt.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+            String jsonBody = String.format("{\"contents\": [{\"parts\": [{\"text\": \"%s\"}]}]}", escapedPrompt);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> request = new HttpEntity<>(jsonBody, headers);
+
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+
+            if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+                log.error("❌ AI Error {}: {}", response.getStatusCode(), response.getBody());
+                return null;
+            }
+
+            String rawText = extractTextFromJson(response.getBody());
+            String cleanedJson = cleanJson(rawText);
+
+            JsonNode root = objectMapper.readTree(cleanedJson);
+            PendingWord pending = new PendingWord();
+            pending.setLang(root.has("lang") ? root.get("lang").asText() : "KG");
+            pending.setKgWord(root.has("kgWord") ? root.get("kgWord").asText() : word);
+            pending.setRuWord(root.has("ruWord") ? root.get("ruWord").asText() : "");
+            pending.setExampleKg(root.has("exampleKg") ? root.get("exampleKg").asText() : "");
+            pending.setExampleRu(root.has("exampleRu") ? root.get("exampleRu").asText() : "");
+            return pending;
+
+        } catch (Exception e) {
+            log.error("❌ Ошибка при генерации словарной карточки", e);
+            return null;
+        }
+    }
+
+    private String cleanJson(String text) {
+        if (text == null) return "{}";
+        text = text.trim();
+        int startIdx = text.indexOf("{");
+        int endIdx = text.lastIndexOf("}");
+        if (startIdx != -1 && endIdx != -1 && endIdx > startIdx) {
+            return text.substring(startIdx, endIdx + 1);
+        }
+        return text;
+    }
+
+    private String extractTextFromJson(String jsonResponse) {
+        try {
+            JsonNode root = objectMapper.readTree(jsonResponse);
+            JsonNode textNode = root.at("/candidates/0/content/parts/0/text");
+            return textNode.isMissingNode() ? "" : textNode.asText();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+}

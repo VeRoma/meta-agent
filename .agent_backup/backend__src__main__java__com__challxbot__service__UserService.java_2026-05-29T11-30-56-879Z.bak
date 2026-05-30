@@ -1,0 +1,331 @@
+package com.challxbot.service;
+
+import com.challxbot.domain.AppUser;
+import com.challxbot.domain.UserProgress;
+import com.challxbot.domain.Vocabulary;
+import com.challxbot.dto.UserStatistics;
+import com.challxbot.repository.AppUserRepository;
+import com.challxbot.repository.UserProgressRepository;
+import com.challxbot.repository.VocabularyRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+import java.util.stream.Collectors;
+
+@Service
+public class UserService {
+
+    private final AppUserRepository userRepository;
+    private final UserProgressRepository userProgressRepository;
+    private final VocabularyRepository vocabularyRepository;
+
+    public record DashboardStats(
+        int totalLearned,
+        int accuracy,
+        int learned20,
+        int learned50,
+        int learned100,
+        int learned500,
+        int learned1000,
+        int learned2613
+    ) {}
+
+    public UserService(AppUserRepository userRepository, UserProgressRepository userProgressRepository,
+            VocabularyRepository vocabularyRepository) {
+        this.userRepository = userRepository;
+        this.userProgressRepository = userProgressRepository;
+        this.vocabularyRepository = vocabularyRepository;
+    }
+
+    @Transactional
+    public AppUser getOrCreateUser(Long telegramId, String username) {
+        return userRepository.findByTelegramId(telegramId)
+                .orElseGet(() -> {
+                    AppUser newUser = new AppUser();
+                    newUser.setTelegramId(telegramId);
+                    newUser.setUsername(username);
+                    newUser.setScore(0);
+                    return userRepository.save(newUser);
+                });
+    }
+
+    @Transactional
+    public void addScore(Long telegramId, int points) {
+        userRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            user.setScore(user.getScore() + points);
+            userRepository.save(user);
+        });
+    }
+
+    @Transactional
+    public void updateProgress(Long telegramId, Long vocabularyId, boolean isCorrect) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        Vocabulary vocab = vocabularyRepository.findById(vocabularyId).orElse(null);
+
+        if (user != null && vocab != null) {
+            UserProgress progress = userProgressRepository.findByUserAndVocabulary(user, vocab)
+                    .orElseGet(() -> {
+                        UserProgress p = new UserProgress();
+                        p.setUser(user);
+                        p.setVocabulary(vocab);
+                        p.setCorrectAnswers(0);
+                        p.setWrongAnswers(0);
+                        p.setShowsKgToRu(0);
+                        p.setShowsRuToKg(0);
+                        return p;
+                    });
+
+            if (isCorrect) {
+                progress.setCorrectAnswers(progress.getCorrectAnswers() + 1);
+            } else {
+                progress.setWrongAnswers(progress.getWrongAnswers() + 1);
+            }
+            userProgressRepository.save(progress);
+        }
+    }
+
+    @Transactional
+    public void recordWordShown(Long telegramId, Long vocabId) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        Vocabulary vocab = vocabularyRepository.findById(vocabId).orElse(null);
+
+        if (user != null && vocab != null) {
+            UserProgress progress = userProgressRepository.findByUserAndVocabulary(user, vocab)
+                    .orElseGet(() -> {
+                        UserProgress p = new UserProgress();
+                        p.setUser(user);
+                        p.setVocabulary(vocab);
+                        p.setCorrectAnswers(0);
+                        p.setWrongAnswers(0);
+                        p.setShowsKgToRu(0);
+                        p.setShowsRuToKg(0);
+                        return p;
+                    });
+
+            progress.setShowsKgToRu(progress.getShowsKgToRu() + 1);
+            progress.setLastShownAt(LocalDateTime.now());
+            userProgressRepository.save(progress);
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public List<Vocabulary> getNextWordsForSession(Long telegramId, int count, int topFrequencyLimit) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        List<Vocabulary> topWords = vocabularyRepository.findByFrequencyBetween(1, topFrequencyLimit);
+        if (topWords.isEmpty()) {
+            topWords = vocabularyRepository.findAll();
+        }
+        if (topWords.isEmpty()) {
+            return List.of();
+        }
+
+        if (user == null) {
+            List<Vocabulary> shuffled = new ArrayList<>(topWords);
+            Collections.shuffle(shuffled);
+            return shuffled.stream().limit(count).collect(Collectors.toList());
+        }
+
+        List<UserProgress> userProgressList = userProgressRepository.findByUser(user);
+        List<Long> seenVocabIds = userProgressList.stream()
+                .map(p -> p.getVocabulary().getId())
+                .collect(Collectors.toList());
+
+        List<Vocabulary> newWords = topWords.stream()
+                .filter(v -> !seenVocabIds.contains(v.getId()))
+                .collect(Collectors.toList());
+        Collections.shuffle(newWords);
+
+        List<Vocabulary> sessionWords = new ArrayList<>();
+        int needed = count;
+
+        for (Vocabulary v : newWords) {
+            if (sessionWords.size() < needed) {
+                sessionWords.add(v);
+            }
+        }
+
+        if (sessionWords.size() < needed) {
+            LocalDateTime fiveMinsAgo = LocalDateTime.now().minusMinutes(5);
+            List<UserProgress> availableProgress = userProgressList.stream()
+                    .filter(p -> p.getLastShownAt() == null || p.getLastShownAt().isBefore(fiveMinsAgo))
+                    .sorted((p1, p2) -> Integer.compare(p2.getWrongAnswers(), p1.getWrongAnswers()))
+                    .collect(Collectors.toList());
+            for (UserProgress p : availableProgress) {
+                if (sessionWords.size() < needed && !sessionWords.contains(p.getVocabulary())) {
+                    sessionWords.add(p.getVocabulary());
+                }
+            }
+        }
+
+        if (sessionWords.size() < needed) {
+            List<Vocabulary> randomFallback = new ArrayList<>(topWords);
+            Collections.shuffle(randomFallback);
+            for (Vocabulary v : randomFallback) {
+                if (sessionWords.size() < needed && !sessionWords.contains(v)) {
+                    sessionWords.add(v);
+                }
+            }
+        }
+
+        return sessionWords;
+    }
+
+    @Transactional(readOnly = true)
+    public Vocabulary getNextWordForUser(Long telegramId, int topFrequencyLimit) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        if (user == null) {
+            List<Vocabulary> all = vocabularyRepository.findAll();
+            return all.isEmpty() ? null : all.get(new Random().nextInt(all.size()));
+        }
+
+        List<UserProgress> userProgressList = userProgressRepository.findByUser(user);
+        List<Vocabulary> topWords = vocabularyRepository.findByFrequencyBetween(1, topFrequencyLimit);
+        if (topWords.isEmpty())
+            topWords = vocabularyRepository.findAll();
+        if (topWords.isEmpty())
+            return null;
+
+        List<Long> seenVocabIds = userProgressList.stream()
+                .map(p -> p.getVocabulary().getId())
+                .collect(Collectors.toList());
+
+        List<Vocabulary> newWords = topWords.stream()
+                .filter(v -> !seenVocabIds.contains(v.getId()))
+                .collect(Collectors.toList());
+
+        if (!newWords.isEmpty())
+            return newWords.get(new Random().nextInt(newWords.size()));
+
+        LocalDateTime fiveMinsAgo = LocalDateTime.now().minusMinutes(5);
+        List<UserProgress> availableProgress = userProgressList.stream()
+                .filter(p -> p.getLastShownAt() == null || p.getLastShownAt().isBefore(fiveMinsAgo))
+                .collect(Collectors.toList());
+
+        if (!availableProgress.isEmpty()) {
+            UserProgress wordToReview = availableProgress.stream()
+                    .max((p1, p2) -> Integer.compare(p1.getWrongAnswers(), p2.getWrongAnswers()))
+                    .orElse(availableProgress.get(new Random().nextInt(availableProgress.size())));
+            return wordToReview.getVocabulary();
+        }
+
+        return topWords.get(new Random().nextInt(topWords.size()));
+    }
+
+    @Transactional(readOnly = true)
+    public List<Vocabulary> getHardestWords(Long telegramId, int limit) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        if (user == null)
+            return List.of();
+
+        return userProgressRepository.findByUser(user).stream()
+                .filter(p -> p.getWrongAnswers() > 0)
+                .sorted((p1, p2) -> Integer.compare(p2.getWrongAnswers(), p1.getWrongAnswers()))
+                .limit(limit)
+                .map(UserProgress::getVocabulary)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public UserStatistics getUserStatistics(Long telegramId) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        if (user == null)
+            return new UserStatistics(0, 0, 0, 0, "Новичок", List.of());
+
+        List<UserProgress> progressList = userProgressRepository.findByUser(user);
+        int totalScore = user.getScore();
+        int learnedWordsCount = (int) progressList.stream().filter(p -> p.getCorrectAnswers() > 0).count();
+        int totalCorrect = progressList.stream().mapToInt(UserProgress::getCorrectAnswers).sum();
+        int totalWrong = progressList.stream().mapToInt(UserProgress::getWrongAnswers).sum();
+
+        String level = learnedWordsCount >= 50 ? "Знаток" : (learnedWordsCount >= 10 ? "Студент" : "Новичок");
+
+        List<Vocabulary> hardestWords = progressList.stream()
+                .filter(p -> p.getWrongAnswers() > 0)
+                .sorted((p1, p2) -> Integer.compare(p2.getWrongAnswers(), p1.getWrongAnswers()))
+                .limit(5)
+                .map(UserProgress::getVocabulary)
+                .collect(Collectors.toList());
+
+        return new UserStatistics(totalScore, learnedWordsCount, totalCorrect, totalWrong, level, hardestWords);
+    }
+
+    @Transactional(readOnly = true)
+    public DashboardStats getDashboardStats(Long telegramId) {
+        AppUser user = userRepository.findByTelegramId(telegramId).orElse(null);
+        if (user == null) {
+            return new DashboardStats(0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        List<UserProgress> progressList = userProgressRepository.findByUser(user);
+        int totalLearned = 0;
+        int totalCorrect = 0;
+        int totalWrong = 0;
+        int l20 = 0, l50 = 0, l100 = 0, l500 = 0, l1000 = 0, l2613 = 0;
+
+        for (UserProgress p : progressList) {
+            totalCorrect += p.getCorrectAnswers();
+            totalWrong += p.getWrongAnswers();
+            if ((p.getCorrectAnswers() - p.getWrongAnswers()) >= 2) {
+                totalLearned++;
+                int freq = p.getVocabulary().getFrequency() != null ? p.getVocabulary().getFrequency() : Integer.MAX_VALUE;
+                if (freq <= 20) l20++;
+                if (freq <= 50) l50++;
+                if (freq <= 100) l100++;
+                if (freq <= 500) l500++;
+                if (freq <= 1000) l1000++;
+                if (freq <= 2613) l2613++;
+            }
+        }
+        int total = totalCorrect + totalWrong;
+        int accuracy = total > 0 ? (totalCorrect * 100) / total : 0;
+        return new DashboardStats(totalLearned, accuracy, l20, l50, l100, l500, l1000, l2613);
+    }
+
+    @Transactional
+    public void toggleTranslationDirection(Long telegramId) {
+        userRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            String dir = user.getTranslationDirection();
+            if (dir.equals("KG_RU")) user.setTranslationDirection("RU_KG");
+            else if (dir.equals("RU_KG")) user.setTranslationDirection("MIXED");
+            else user.setTranslationDirection("KG_RU");
+            userRepository.save(user);
+        });
+    }
+
+    @Transactional
+    public void toggleRecallDelay(Long telegramId) {
+        userRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            int delay = user.getRecallDelaySeconds();
+            if (delay == 0) user.setRecallDelaySeconds(1);
+            else if (delay == 1) user.setRecallDelaySeconds(2);
+            else if (delay == 2) user.setRecallDelaySeconds(3);
+            else if (delay == 3) user.setRecallDelaySeconds(5);
+            else user.setRecallDelaySeconds(0);
+            userRepository.save(user);
+        });
+    }
+
+    @Transactional
+    public void toggleMaxSessionWords(Long telegramId) {
+        userRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            int max = user.getMaxSessionWords();
+            if (max == 10) user.setMaxSessionWords(20);
+            else if (max == 20) user.setMaxSessionWords(30);
+            else if (max == 30) user.setMaxSessionWords(0);
+            else user.setMaxSessionWords(10);
+            userRepository.save(user);
+        });
+    }
+
+    @Transactional
+    public void resetProgress(Long telegramId) {
+        userRepository.findByTelegramId(telegramId).ifPresent(user -> {
+            List<UserProgress> progress = userProgressRepository.findByUser(user);
+            userProgressRepository.deleteAll(progress);
+        });
+    }
+}

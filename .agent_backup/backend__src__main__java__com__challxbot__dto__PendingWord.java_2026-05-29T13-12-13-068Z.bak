@@ -1,0 +1,13 @@
+package com.challxbot.dto;
+
+import lombok.Data;
+
+@Data
+public class PendingWord {
+    private String lang;
+    private String kgWord;
+    private String ruWord;
+    private String exampleKg;
+    private String exampleRu;
+    private Integer messageId;
+}
