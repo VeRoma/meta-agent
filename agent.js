@@ -36,18 +36,20 @@ for (const item of items) {
     }
 }
 
-console.log('\n========================================');
-console.log('🤖 DEV-AGENT CLI - СИСТЕМА ИНИЦИАЛИЗАЦИИ');
-console.log('========================================\n');
-console.log('📂 Найдены проекты в рабочей директории:');
+// Выводим баннер и список только при ручном запуске из консоли
+if (!process.env.AUTO_PROJECT) {
+    console.log('\n========================================');
+    console.log('🤖 DEV-AGENT CLI - СИСТЕМА ИНИЦИАЛИЗАЦИИ');
+    console.log('========================================\n');
+    console.log('📂 Найдены проекты в рабочей директории:');
 
-projects.forEach((proj, idx) => {
-    console.log(`   [${idx + 1}] ${proj}`);
-});
+    projects.forEach((proj, idx) => {
+        console.log(`   [${idx + 1}] ${proj}`);
+    });
+}
 
-rl.question('\n❓ С каким проектом работаем сегодня? (введи цифру): ', async (answer) => {
-    const index = parseInt(answer.trim()) - 1;
-    
+// === ВЫНОСИМ ЛОГИКУ ЗАПУСКА В ОТДЕЛЬНУЮ ФУНКЦИЮ ===
+async function initProject(index) {
     if (isNaN(index) || index < 0 || index >= projects.length) {
         console.log('❌ Неверный выбор. Запуск отменен.');
         process.exit(1);
@@ -87,5 +89,32 @@ rl.question('\n❓ С каким проектом работаем сегодн�
 
     // Передаем управление в Chat Loop
     const { startCLI } = await import('./src/cli/chat.js');
+    
+    // 💡 МАГИЯ ДЛЯ TELEGRAM-БОТА: Читаем файл с ТЗ, если он есть
+    const taskFilePath = path.join(process.cwd(), 'agent_task.txt');
+    if (fs.existsSync(taskFilePath)) {
+        const taskText = fs.readFileSync(taskFilePath, 'utf-8').trim();
+        if (taskText) {
+            console.log('📥 Обнаружено ТЗ от Telegram-бота! Передаю Агенту...');
+            // Удаляем файл, чтобы при следующем ручном запуске он не сработал снова
+            fs.unlinkSync(taskFilePath); 
+            
+            // Запускаем CLI, передавая ему текст первого сообщения!
+            startCLI(taskText); 
+            return;
+        }
+    }
+
+    // Если файла нет — обычный ручной режим
     startCLI();
-});
+}
+
+// === ПРОВЕРЯЕМ РЕЖИМ ЗАПУСКА (АВТО ИЛИ РУЧНОЙ) ===
+if (process.env.AUTO_PROJECT) {
+    console.log(`🤖 Режим Telegram-бота. Авто-выбор проекта: ${process.env.AUTO_PROJECT}`);
+    initProject(parseInt(process.env.AUTO_PROJECT) - 1);
+} else {
+    rl.question('\n❓ С каким проектом работаем сегодня? (введи цифру): ', (answer) => {
+        initProject(parseInt(answer.trim()) - 1);
+    });
+}

@@ -1,8 +1,9 @@
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
 let currentProcess = null;
+let logTailInterval = null;
 
 export function runDevServer(targetPath, onErrorCallback) {
     if (currentProcess) {
@@ -11,9 +12,15 @@ export function runDevServer(targetPath, onErrorCallback) {
     }
 
     let runPath = path.resolve(process.cwd(), targetPath);
-    
-    // Автопоиск папки с package.json (специально для твоего монорепозитория)
-    if (!fs.existsSync(path.join(runPath, 'package.json'))) {
+    let isJava = false;
+
+    // Автопоиск скриптов PowerShell для Java/Spring Boot
+    if (fs.existsSync(path.join(runPath, 'backend', 'start.ps1'))) {
+        runPath = path.join(runPath, 'backend');
+        isJava = true;
+    } else if (fs.existsSync(path.join(runPath, 'start.ps1'))) {
+        isJava = true;
+    } else if (!fs.existsSync(path.join(runPath, 'package.json'))) {
         const items = fs.readdirSync(runPath);
         for (const item of items) {
             const subPath = path.join(runPath, item);
@@ -24,54 +31,76 @@ export function runDevServer(targetPath, onErrorCallback) {
         }
     }
 
-    console.log(`\n🚀 Запускаю фоновый процесс в: ${runPath}`);
-    
-    // Запускаем сервер асинхронно
-    currentProcess = spawn('npm', ['run', 'dev'], { 
-        cwd: runPath, 
-        shell: true 
-    });
-
-    let errorBuffer = "";
-    let errorTimer = null;
+    console.log(`\n🚀 Запускаю сервер в: ${runPath}`);
 
     const processOutput = (data) => {
         const output = data.toString();
         process.stdout.write(`[SERVER] ${output}`);
         
-        // Эвристика: ищем ошибки в логах терминала
         const lowerOutput = output.toLowerCase();
-        if ((lowerOutput.includes('error') && !lowerOutput.includes('0 errors')) || lowerOutput.includes('failed')) {
-            errorBuffer += output + "\n";
+        if ((lowerOutput.includes('error') && !lowerOutput.includes('0 errors')) || 
+            lowerOutput.includes('failed') || 
+            lowerOutput.includes('exception') || 
+            lowerOutput.includes('build failure')) {
             
-            // Собираем ошибки 2 секунды (чтобы не спамить Агента на каждую строчку лога)
-            if (!errorTimer) {
-                errorTimer = setTimeout(() => {
-                    onErrorCallback(errorBuffer);
-                    errorBuffer = "";
-                    errorTimer = null;
-                }, 2000);
-            }
+            onErrorCallback(output);
         }
     };
 
-    currentProcess.stdout.on('data', processOutput);
-    currentProcess.stderr.on('data', processOutput);
+    if (isJava) {
+        // --- РЕЖИМ JAVA (SPRING BOOT) ---
+        try {
+            execSync('powershell -ExecutionPolicy Bypass -File .\\stop.ps1', { cwd: runPath, stdio: 'ignore' });
+        } catch(e) {}
 
-    currentProcess.on('close', (code) => {
-        console.log(`\n🛑 Процесс завершен (код ${code}).`);
-        currentProcess = null;
-    });
+        console.log("⚙️ Выполняю start.ps1...");
+        execSync('powershell -ExecutionPolicy Bypass -File .\\start.ps1', { cwd: runPath });
+        
+        currentProcess = { isJava: true, runPath };
+
+        // Ищем свежий лог-файл (server_*.log)
+        setTimeout(() => {
+            const files = fs.readdirSync(runPath).filter(f => f.startsWith('server_') && f.endsWith('.log'));
+            if (files.length > 0) {
+                const latestLog = path.join(runPath, files.sort().reverse()[0]);
+                let lastSize = fs.statSync(latestLog).size;
+                
+                logTailInterval = setInterval(() => {
+                    if (!fs.existsSync(latestLog)) return;
+                    const currentSize = fs.statSync(latestLog).size;
+                    
+                    if (currentSize > lastSize) {
+                        const stream = fs.createReadStream(latestLog, { start: lastSize, end: currentSize });
+                        stream.on('data', (chunk) => processOutput(chunk));
+                        lastSize = currentSize;
+                    }
+                }, 1000);
+            }
+        }, 2000);
+
+    } else {
+        // --- РЕЖИМ NODE.JS ---
+        currentProcess = spawn('npm', ['run', 'dev'], { cwd: runPath, shell: true });
+        currentProcess.stdout.on('data', processOutput);
+        currentProcess.stderr.on('data', processOutput);
+        currentProcess.on('close', () => { currentProcess = null; });
+    }
 }
 
 export function stopDevServer() {
     if (currentProcess) {
         console.log("\n🛑 Убиваю процесс сервера...");
-        // Жестко убиваем процесс на Windows, чтобы освободить порт 5173
-        if (process.platform === 'win32') {
-            spawn("taskkill", ["/pid", currentProcess.pid, '/f', '/t']);
+        if (currentProcess.isJava) {
+            try {
+                execSync('powershell -ExecutionPolicy Bypass -File .\\stop.ps1', { cwd: currentProcess.runPath, stdio: 'ignore' });
+            } catch(e) {}
+            if (logTailInterval) { clearInterval(logTailInterval); logTailInterval = null; }
         } else {
-            currentProcess.kill();
+            if (process.platform === 'win32') {
+                spawn("taskkill", ["/pid", currentProcess.pid, '/f', '/t']);
+            } else {
+                currentProcess.kill();
+            }
         }
         currentProcess = null;
     } else {

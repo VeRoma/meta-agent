@@ -4,7 +4,7 @@
     "executorModel": "gemini-3.1-pro-preview"
   },
   "workspace": {
-    "targetProject": "../chall-x-bot",
+    "targetProject": "../ComfyUI-MyGemini",
     "backupDir": ".dev-agent/backups"
   },
   "prompts": {

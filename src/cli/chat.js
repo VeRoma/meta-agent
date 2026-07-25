@@ -16,7 +16,7 @@ import { determineRelevantFiles } from "../core/routing.js";
 import { generateDocumentation, generateIndexes } from '../fs/docs-generator.js';
 import { applyPatches, abortSessionPatches, clearSessionBackups, applyRedoPatches } from '../fs/patcher.js';
 import { runLinter } from '../core/linter.js';
-import { runDevServer, stopDevServer } from './runner.js'; // <-- ИМПОРТ RUNNER
+import { runDevServer, stopDevServer } from './runner.js';
 
 const configPath = path.join(process.cwd(), "agent.config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -26,13 +26,23 @@ const rl = readline.createInterface({
     output: process.stdout,
 });
 
-export function startCLI() {
+export async function startCLI(initialTask = null) {
     console.log(`\n🚀 Dev-Agent initialized!`);
     console.log(`🧠 Executor: ${config.llm.executorModel}`);
     console.log(`📂 Working directory: ${config.workspace.targetProject}`);
 
     initSession("Current development (General)");
-    chatLoop();
+    
+    // Если нам передали ТЗ извне (от Telegram-бота)
+    if (initialTask) {
+        console.log("📥 Обрабатываю внешнюю задачу...\n");
+        await processAgentTask(initialTask);
+        // Завершаем процесс после выполнения задачи (чтобы освободить память Telegram-бота)
+        process.exit(0); 
+    } else {
+        // Иначе запускаем обычный ручной чат
+        chatLoop();
+    }
 }
 
 async function handleCommand(command) {
@@ -90,7 +100,6 @@ export async function processAgentTask(text) {
     appendToSession("user", text);
 
     try {
-        // 1. ИСПРАВЛЕНО: Регулярка теперь понимает слеши в путях файлов
         const mentionRegex = /@([a-zA-Z0-9_.\-\/]+)/g;
         const mentions = [...text.matchAll(mentionRegex)].map(m => m[1]);
         const allProjectFiles = getProjectFiles(config.workspace.targetProject);
@@ -102,7 +111,6 @@ export async function processAgentTask(text) {
                     const normalizedPath = f.replace(/\\/g, '/');
                     const base = path.basename(normalizedPath);
                     const nameWithoutExt = base.replace(/\.[^/.]+$/, "");
-                    // 2. ИСПРАВЛЕНО: Ищем не только по имени, но и по кускам пути
                     return base === mention || nameWithoutExt === mention || normalizedPath === mention || normalizedPath.endsWith(mention);
                 });
                 
@@ -148,8 +156,9 @@ CRITICAL INSTRUCTIONS (READ CAREFULLY):
 3. AUTONOMOUS FILE READING: If you need to read a file that is not in the CODE CONTEXT, DO NOT ask the user to copy-paste it! Instead, use "chat" mode and mention the file with an @ prefix (e.g., "@vite.config.ts"). The system will automatically fetch it for you in the next turn.
 4. THE "DO NO HARM" RULE FOR PATCHING: When updating a file, you MUST preserve 100% of the original formatting, indentation, styling (e.g. Tailwind classes), comments, and unrelated logic. NEVER hallucinate, truncate, or simplify existing code. If a file is too complex or monolithic to patch safely without losing formatting, DO NOT offload the mechanical work to the user (e.g., do not ask them to copy-paste snippets). Instead, use "chat" mode to warn the user about the complexity and propose a refactoring plan (e.g., decomposing the file) before implementing the requested feature.
 5. TERMINAL AUTONOMY: Commands in "commandsToRun" are executed AUTOMATICALLY and SYNCHRONOUSLY. DO NOT tell the user to run commands and DO NOT tell them to wait. You handle it automatically.
-6. SERVER MANAGEMENT: If you modified config files (vite.config.ts, etc.) or installed major packages, you MUST restart the dev server automatically by setting "restartServer": true in your JSON response. DO NOT ask the user to restart it.
-7. The "plan" and "message" fields MUST be written in Russian.
+6. SERVER MANAGEMENT: To restart the server autonomously, you MUST strictly set "restartServer": true in your JSON response. The system will handle the safe background restart automatically. DO NOT add any terminal commands for server restart to "commandsToRun".
+7. SECURITY & SECRETS MANAGEMENT: NEVER hardcode secrets, API keys, tokens, or passwords in the source code. ALWAYS use environment variables. If a project requires secrets, you MUST autonomously create an empty \`.env\` file for local development and a \`.env.example\` file with safe placeholder values for version control. CRITICAL: Before creating or modifying a \`.env\` file, you MUST verify that \`.env\` and \`.env.*\` are explicitly listed in the project's \`.gitignore\`. If they are not, add them immediately.
+8. The "plan" and "message" fields MUST be written in Russian.
 
 Expected JSON format:
 {
@@ -211,13 +220,12 @@ Answer the developer's last message:
                 console.log("========================================================\n");
                 appendToSession("agent", parsedResponse.message);
                 
-                // 3. ИСПРАВЛЕНО: Авто-подхват файлов, запрошенных самим Агентом
                 const agentMentions = [...parsedResponse.message.matchAll(/@([a-zA-Z0-9_.\-\/]+)/g)].map(m => m[1]);
                 if (agentMentions.length > 0) {
                     console.log(`\n⚙️ Система автономно загружает запрошенные файлы для Агента...`);
                     const autoPrompt = `[SYSTEM] Содержимое запрошенных файлов загружено: ${agentMentions.map(m => `@${m}`).join(' ')}. Изучи их и продолжай задачу (используй mode: "patch", если готов писать код).`;
                     await processAgentTask(autoPrompt);
-                    return; // Завершаем текущий вызов, так как рекурсия всё сделает
+                    return; 
                 }
 
                 triggerRestartIfNeeded();
@@ -316,12 +324,11 @@ function chatLoop() {
 
         if (text.toLowerCase() === "exit" || text.toLowerCase() === "quit") {
             console.log("👋 Shutting down. See you!");
-            stopDevServer(); // Убиваем сервер при выходе
+            stopDevServer();
             rl.close();
             return;
         }
 
-        // === ИНТЕГРАЦИЯ УПРАВЛЕНИЯ СЕРВЕРОМ ===
         if (text === "/stop") {
             stopDevServer();
             chatLoop();
@@ -336,7 +343,7 @@ function chatLoop() {
                 await processAgentTask(errorPrompt);
                 
                 console.log('\n✅ Попытка исправления завершена. Посмотрите логи сервера выше.');
-                rl.prompt(); // Возвращаем приглашение ввода
+                rl.prompt();
             });
             chatLoop();
             return;
@@ -377,7 +384,6 @@ function chatLoop() {
             return;
         }
 
-        // Передаем стандартный ввод в основную функцию Агента
         await processAgentTask(text);
         chatLoop();
     });

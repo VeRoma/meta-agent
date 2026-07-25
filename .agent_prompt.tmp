@@ -1,17 +1,19 @@
-Fix Cleanup in onUpdateReceived:
+Task: The PSQLException duplicate key (user_id, vocabulary_id) is STILL happening. The logs show Hibernate is executing an INSERT statement instead of an UPDATE.
 
-Locate the block where plain text is processed for a dictionary search (when userState is DEFAULT or null).
-
-BEFORE sending the ⏳ Анализирую... message or the DB search result, you MUST explicitly call your cleanup methods (e.g., deleteSessionMessage(chatId) and clearLastMenuMessage(chatId)).
-
-This ensures that any active quiz question (with its inline keyboard) or open menu is completely deleted from the chat before the dictionary card appears.
-
-Preserve User Text:
-
-Continue to ensure that the user's incoming text message is NOT deleted.
-
-Keep existing logic:
-
-Do not alter the DB search, AI generation, saving, or handleResumeQuiz mechanics.
-
-Do NOT execute any run/start commands. Provide the code patch.
+1. Analyze TelegramBotService.java. Find EVERY place where you handle the quiz answer and save to userWordProgressRepository.
+2. The bug occurs because the code is still instantiating new UserWordProgress() for existing records. 
+3. You MUST rewrite the saving logic using this strict pattern:
+   Optional<UserWordProgress> optProgress = userWordProgressRepository.findByAppUserAndVocabulary(appUser, vocabulary);
+   UserWordProgress progress;
+   if (optProgress.isPresent()) {
+       progress = optProgress.get();
+   } else {
+       progress = new UserWordProgress();
+       progress.setAppUser(appUser);
+       progress.setVocabulary(vocabulary);
+       // set other initial required fields
+   }
+   // Now update the progress fields (streak, interval, etc.)
+   userWordProgressRepository.save(progress);
+4. Make sure you don't have multiple conflicting save calls.
+5. Apply the patch and set "restartServer": true.
