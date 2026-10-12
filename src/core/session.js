@@ -4,17 +4,19 @@ import { askModel } from './llm.js';
 
 // Функция, которая динамически вычисляет путь к памяти текущего проекта
 function getSessionFile() {
-    const configPath = path.join(process.cwd(), 'agent.config.json');
+    const configPath = path.join(process.cwd(), 'meta.config.json');
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     const targetProjectAbs = path.resolve(process.cwd(), config.workspace.targetProject);
-    const devAgentDir = path.join(targetProjectAbs, '.dev-agent');
     
-    if (!fs.existsSync(devAgentDir)) {
-        fs.mkdirSync(devAgentDir, { recursive: true });
+    // Меняем папку на .meta-agent для независимой памяти
+    const metaAgentDir = path.join(targetProjectAbs, '.meta-agent');
+    
+    if (!fs.existsSync(metaAgentDir)) {
+        fs.mkdirSync(metaAgentDir, { recursive: true });
     }
     
     // Сохраняем как markdown для красивого отображения в Git
-    return path.join(devAgentDir, 'session.md');
+    return path.join(metaAgentDir, 'session.md');
 }
 
 const MAX_SESSION_LENGTH = 150000;
@@ -42,7 +44,8 @@ export function appendToSession(role, text) {
     const sessionFile = getSessionFile();
     if (!fs.existsSync(sessionFile)) return;
     
-    const prefix = role === 'user' ? '\n🧑 **Разработчик:** ' : '\n🤖 **Агент:** ';
+    // Даем Агенту новое имя в логах
+    const prefix = role === 'user' ? '\n🧑 **Разработчик:** ' : '\n🤖 **Meta-Agent:** ';
     fs.appendFileSync(sessionFile, `${prefix}${text}\n`, 'utf-8');
 }
 

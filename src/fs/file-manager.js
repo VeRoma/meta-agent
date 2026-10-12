@@ -5,7 +5,7 @@ import ignore from 'ignore';
 // Функция для загрузки и парсинга .agentignore
 function getIgnoreFilter(agentRootDir) {
     const ig = ignore();
-    const ignorePath = path.join(agentRootDir, '.agentignore');
+    const ignorePath = path.join(agentRootDir, '.metaignore');
     
     if (fs.existsSync(ignorePath)) {
         const ignoreContent = fs.readFileSync(ignorePath, 'utf-8');

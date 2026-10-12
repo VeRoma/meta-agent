@@ -1,11 +1,11 @@
 {
-  "name": "dev-agent",
+  "name": "meta-agent",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node agent.js",
-    "agent": "node agent.js"
+    "start": "node meta-agent.js",
+    "meta": "node meta-agent.js"
   },
   "keywords": [],
   "author": "",

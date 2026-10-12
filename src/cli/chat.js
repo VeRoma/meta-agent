@@ -18,7 +18,7 @@ import { applyPatches, abortSessionPatches, clearSessionBackups, applyRedoPatche
 import { runLinter } from '../core/linter.js';
 import { runDevServer, stopDevServer } from './runner.js';
 
-const configPath = path.join(process.cwd(), "agent.config.json");
+const configPath = path.join(process.cwd(), "meta.config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
 const rl = readline.createInterface({
@@ -27,20 +27,17 @@ const rl = readline.createInterface({
 });
 
 export async function startCLI(initialTask = null) {
-    console.log(`\n🚀 Dev-Agent initialized!`);
+    console.log(`\n🚀 Meta-Agent CLI initialized!`);
     console.log(`🧠 Executor: ${config.llm.executorModel}`);
-    console.log(`📂 Working directory: ${config.workspace.targetProject}`);
+    console.log(`🎯 Target Project: ${config.workspace.targetProject}`);
 
-    initSession("Current development (General)");
+    initSession("Meta-Agent Operation (General)");
     
-    // Если нам передали ТЗ извне (от Telegram-бота)
     if (initialTask) {
         console.log("📥 Обрабатываю внешнюю задачу...\n");
         await processAgentTask(initialTask);
-        // Завершаем процесс после выполнения задачи (чтобы освободить память Telegram-бота)
         process.exit(0); 
     } else {
-        // Иначе запускаем обычный ручной чат
         chatLoop();
     }
 }
@@ -54,7 +51,7 @@ async function handleCommand(command) {
             await generateIndexes(config.workspace.targetProject);
             clearSession();
             clearSessionBackups();
-            initSession('New task (waiting...)');
+            initSession('New audit task (waiting...)');
             console.log('🧹 Temporary session and backups cleared. Ready for a new task!');
             break;
             
@@ -94,15 +91,18 @@ async function handleCommand(command) {
     }
 }
 
-// === НОВАЯ ФУНКЦИЯ: Основной цикл Агента ===
 export async function processAgentTask(text) {
-    console.log("🤖 Agent is gathering context...");
+    console.log("👁️ Meta-Agent is gathering context...");
     appendToSession("user", text);
 
     try {
         const mentionRegex = /@([a-zA-Z0-9_.\-\/]+)/g;
         const mentions = [...text.matchAll(mentionRegex)].map(m => m[1]);
-        const allProjectFiles = getProjectFiles(config.workspace.targetProject);
+        
+        // ФИЛЬТР: Meta-Agent не должен видеть или редактировать файлы внутри .meta-agent (собственную память)
+        let allProjectFiles = getProjectFiles(config.workspace.targetProject);
+        allProjectFiles = allProjectFiles.filter(f => !f.includes('.meta-agent'));
+
         let forcedFiles = [];
 
         if (mentions.length > 0) {
@@ -118,7 +118,7 @@ export async function processAgentTask(text) {
                     forcedFiles.push(matched);
                     console.log(`📌 Explicitly included: ${mention}`);
                 } else {
-                    console.log(`⚠️ Mentioned file not found in project: ${mention}`);
+                    console.log(`⚠️ Mentioned file not found (or access restricted): ${mention}`);
                 }
             }
         }
@@ -127,7 +127,7 @@ export async function processAgentTask(text) {
         relevantFiles = [...new Set([...forcedFiles, ...relevantFiles])];
 
         if (relevantFiles.length > 0) {
-            console.log(`📂 Files selected for analysis: ${relevantFiles.length}`);
+            console.log(`📂 Files selected for audit/modification: ${relevantFiles.length}`);
             relevantFiles.forEach((f) => console.log(`   - ${path.basename(f)}`));
         }
 
@@ -140,8 +140,11 @@ export async function processAgentTask(text) {
             const sessionContext = getSession();
             const projectTree = generateProjectTree(config.workspace.targetProject);
 
+            // Динамически подтягиваем системную роль из конфига
+            const systemRole = config.prompts ? config.prompts.systemRole : "You are Meta-Agent, an autonomous AI Overseer.";
+
             const prompt = `
-PROJECT STRUCTURE (Use this to understand architecture and import paths):
+PROJECT STRUCTURE (Target: ${config.workspace.targetProject}):
 ${projectTree}
 
 CODE CONTEXT:
@@ -151,37 +154,35 @@ CURRENT SESSION:
 ${sessionContext}
 
 CRITICAL INSTRUCTIONS (READ CAREFULLY):
-1. You are an autonomous Senior Software Architect and Developer.
+1. ${systemRole}
 2. You MUST respond ONLY with a valid JSON object. Do not use markdown wrappers like \`\`\`json.
-3. AUTONOMOUS FILE READING: If you need to read a file that is not in the CODE CONTEXT, DO NOT ask the user to copy-paste it! Instead, use "chat" mode and mention the file with an @ prefix (e.g., "@vite.config.ts"). The system will automatically fetch it for you in the next turn.
-4. THE "DO NO HARM" RULE FOR PATCHING: When updating a file, you MUST preserve 100% of the original formatting, indentation, styling (e.g. Tailwind classes), comments, and unrelated logic. NEVER hallucinate, truncate, or simplify existing code. If a file is too complex or monolithic to patch safely without losing formatting, DO NOT offload the mechanical work to the user (e.g., do not ask them to copy-paste snippets). Instead, use "chat" mode to warn the user about the complexity and propose a refactoring plan (e.g., decomposing the file) before implementing the requested feature.
-5. TERMINAL AUTONOMY: Commands in "commandsToRun" are executed AUTOMATICALLY and SYNCHRONOUSLY. DO NOT tell the user to run commands and DO NOT tell them to wait. You handle it automatically.
-6. SERVER MANAGEMENT: To restart the server autonomously, you MUST strictly set "restartServer": true in your JSON response. The system will handle the safe background restart automatically. DO NOT add any terminal commands for server restart to "commandsToRun".
-7. SECURITY & SECRETS MANAGEMENT: NEVER hardcode secrets, API keys, tokens, or passwords in the source code. ALWAYS use environment variables. If a project requires secrets, you MUST autonomously create an empty \`.env\` file for local development and a \`.env.example\` file with safe placeholder values for version control. CRITICAL: Before creating or modifying a \`.env\` file, you MUST verify that \`.env\` and \`.env.*\` are explicitly listed in the project's \`.gitignore\`. If they are not, add them immediately.
-8. The "plan" and "message" fields MUST be written in Russian.
+3. AUTONOMOUS FILE READING: If you need to read a file that is not in the CODE CONTEXT, use "chat" mode and mention the file with an @ prefix (e.g., "@agent.js"). The system will fetch it.
+4. THE "DO NO HARM" RULE: Preserve original formatting, logic, and comments. DO NOT modify files in the .meta-agent directory.
+5. TERMINAL AUTONOMY: Commands in "commandsToRun" are executed AUTOMATICALLY. 
+6. SERVER MANAGEMENT: Set "restartServer": true to autonomously restart the target project's server.
+7. The "plan" and "message" fields MUST be written in Russian.
 
 Expected JSON format:
 {
   "mode": "chat" | "patch",
   "plan": [
-    "1. Анализирую архитектуру и нахожу нужный компонент...",
-    "2. Формирую логику для новой функции...",
-    "3. Пишу безопасный патч для файла..."
+    "1. Анализирую архитектуру целевого агента...",
+    "2. Пишу безопасный патч для файла..."
   ],
   "message": "Detailed response (for chat) OR short action summary (for patch) in Russian.",
   "filesToUpdate": [
     {
-      "path": "app/components/FileName.tsx",
-      "content": "// ... entire file content here (not just diff, the FULL file) ..."
+      "path": "src/core/example.js",
+      "content": "// ... entire file content here ..."
     }
   ],
   "filesToDelete": [
     {
-      "path": "app/components/OldFile.tsx"
+      "path": "src/old_file.js"
     }
   ],
   "commandsToRun": [
-    "npm install three"
+    "npm install"
   ],
   "restartServer": false
 }
@@ -197,20 +198,20 @@ Answer the developer's last message:
 
             const triggerRestartIfNeeded = () => {
                 if (parsedResponse.restartServer) {
-                    console.log("\n🔄 Агент автономно перезапускает dev-сервер...");
+                    console.log("\n🔄 Meta-Agent запускает процесс тестирования целевого агента...");
                     stopDevServer();
                     runDevServer(config.workspace.targetProject, async (errorLog) => {
-                        console.log(`\n🚨 ВНИМАНИЕ: Сервер выкинул ошибку! Передаю Агенту на авто-исправление...`);
-                        const errorPrompt = `[SYSTEM ERROR] Локальный dev-сервер упал с ошибками компиляции. Проанализируй этот лог, найди проблемный файл и сгенерируй патч с исправлением кода:\n\n${errorLog}`;
+                        console.log(`\n🚨 ВНИМАНИЕ: Целевой процесс упал с ошибкой! Передаю на авто-исправление...`);
+                        const errorPrompt = `[SYSTEM ERROR] Процесс target-agent упал. Проанализируй этот лог, найди проблемный файл и сгенерируй патч:\n\n${errorLog}`;
                         await processAgentTask(errorPrompt);
-                        console.log('\n✅ Попытка исправления завершена. Посмотрите логи сервера выше.');
+                        console.log('\n✅ Попытка исправления завершена.');
                         rl.prompt();
                     });
                 }
             };
 
             if (parsedResponse.plan && Array.isArray(parsedResponse.plan) && parsedResponse.plan.length > 0) {
-                console.log(`\n🧠 Agent's Logic & Plan:`);
+                console.log(`\n🧠 Meta-Agent's Plan:`);
                 parsedResponse.plan.forEach(step => console.log(`   🔸 ${step}`));
             }
 
@@ -222,8 +223,8 @@ Answer the developer's last message:
                 
                 const agentMentions = [...parsedResponse.message.matchAll(/@([a-zA-Z0-9_.\-\/]+)/g)].map(m => m[1]);
                 if (agentMentions.length > 0) {
-                    console.log(`\n⚙️ Система автономно загружает запрошенные файлы для Агента...`);
-                    const autoPrompt = `[SYSTEM] Содержимое запрошенных файлов загружено: ${agentMentions.map(m => `@${m}`).join(' ')}. Изучи их и продолжай задачу (используй mode: "patch", если готов писать код).`;
+                    console.log(`\n⚙️ Система подтягивает файлы для Meta-Agent...`);
+                    const autoPrompt = `[SYSTEM] Файлы загружены: ${agentMentions.map(m => `@${m}`).join(' ')}. Продолжай задачу (используй mode: "patch", если готов).`;
                     await processAgentTask(autoPrompt);
                     return; 
                 }
@@ -250,10 +251,15 @@ Answer the developer's last message:
                 }
 
                 if (commandsToRun.length > 0) {
-                    console.log(`\n⚙️ Agent is executing ${commandsToRun.length} command(s) autonomously:`);
-                    for (const cmd of commandsToRun) {
+                    console.log(`\n⚙️ Meta-Agent выполняет команды в целевой директории:`);
+                    // Изменено: const cmd заменен на let cmd
+                    for (let cmd of commandsToRun) {
+                        
+                        // ПАТЧ ДЛЯ WINDOWS: принудительно экранируем одинарные кавычки в git commit
+                        cmd = cmd.replace(/git commit -m '([^']+)'/g, 'git commit -m "$1"');
+
                         console.log(`\n   > ${cmd}`);
-                        console.log(`⏳ Running (Auto-approved)...`);
+                        console.log(`⏳ Running...`);
                         try {
                             execSync(cmd, { 
                                 stdio: 'inherit', 
@@ -270,11 +276,11 @@ Answer the developer's last message:
                 }
 
                 if (toUpdate.length > 0) {
-                    console.log("\n🔍 Checking code quality...");
+                    console.log("\n🔍 Запуск проверки кода целевого агента...");
                     const lintResult = await runLinter(config.workspace.targetProject, toUpdate);
 
                     if (lintResult.success) {
-                        console.log("✨ Code is clean! No errors found.");
+                        console.log("✨ Проверка пройдена! Код чист.");
                         appendToSession("agent", `[PATCH APPLIED SUCCESSFULLY]: ${parsedResponse.message}`);
                         triggerRestartIfNeeded();
                         break; 
@@ -282,23 +288,23 @@ Answer the developer's last message:
                         healingAttempts++;
                         
                         if (healingAttempts > maxHealingAttempts) {
-                            console.log("❌ Auto-healing failed. Too many attempts. Manual fix required.");
+                            console.log("❌ Авто-исправление не удалось. Требуется ручное вмешательство.");
                             console.log(`\nLinter Output:\n${lintResult.error}\n`);
                             appendToSession("agent", `[PATCH APPLIED BUT LINTER FAILED]: ${parsedResponse.message}`);
                             break;
                         }
 
-                        console.log(`⚠️ Linter found errors. Initiating Auto-Healing...`);
+                        console.log(`⚠️ Обнаружены ошибки. Запуск модуля исправления...`);
                         
                         const absoluteUpdatedPaths = toUpdate.map(f => path.resolve(process.cwd(), config.workspace.targetProject, f.path));
                         relevantFiles = [...new Set([...relevantFiles, ...absoluteUpdatedPaths])];
 
                         appendToSession("agent", `[PATCH APPLIED WITH ERRORS]: ${parsedResponse.message}`);
-                        const errorPrompt = `[SYSTEM ERROR] Linter failed on the code you just wrote. Fix these errors and return the corrected files in "patch" mode:\n\n${lintResult.error}`;
+                        const errorPrompt = `[SYSTEM ERROR] Linter failed on the code you just wrote. Fix these errors in "patch" mode:\n\n${lintResult.error}`;
                         appendToSession("user", errorPrompt);
                     }
                 } else {
-                    console.log("✨ Task completed.");
+                    console.log("✨ Аудит завершен.");
                     appendToSession("agent", `[TASK COMPLETED]: ${parsedResponse.message}`);
                     triggerRestartIfNeeded();
                     break;
@@ -312,7 +318,7 @@ Answer the developer's last message:
         }
 
     } catch (error) {
-        console.error("\n❌ Processing error (model might not have returned valid JSON):", error.message);
+        console.error("\n❌ Ошибка обработки JSON от модели:", error.message);
     }
 
     await compressSessionIfNeeded();
@@ -323,7 +329,7 @@ function chatLoop() {
         let text = answer.trim();
 
         if (text.toLowerCase() === "exit" || text.toLowerCase() === "quit") {
-            console.log("👋 Shutting down. See you!");
+            console.log("👋 Надзиратель отключается. До связи!");
             stopDevServer();
             rl.close();
             return;
@@ -337,12 +343,12 @@ function chatLoop() {
 
         if (text === "/run") {
             runDevServer(config.workspace.targetProject, async (errorLog) => {
-                console.log(`\n🚨 ВНИМАНИЕ: Сервер выкинул ошибку! Передаю Агенту на авто-исправление...`);
-                const errorPrompt = `[SYSTEM ERROR] Локальный dev-сервер упал с ошибками компиляции. Проанализируй этот лог, найди проблемный файл и сгенерируй патч с исправлением кода:\n\n${errorLog}`;
+                console.log(`\n🚨 ВНИМАНИЕ: Процесс target-agent упал! Передаю на авто-исправление...`);
+                const errorPrompt = `[SYSTEM ERROR] Целевой процесс упал с ошибкой. Проанализируй лог, найди проблемный файл и исправь код:\n\n${errorLog}`;
                 
                 await processAgentTask(errorPrompt);
                 
-                console.log('\n✅ Попытка исправления завершена. Посмотрите логи сервера выше.');
+                console.log('\n✅ Попытка исправления завершена.');
                 rl.prompt();
             });
             chatLoop();
@@ -350,7 +356,7 @@ function chatLoop() {
         }
 
         if (text === "/editor") {
-            const tempPromptFile = path.join(process.cwd(), '.agent_prompt.tmp');
+            const tempPromptFile = path.join(process.cwd(), '.meta_prompt.tmp');
             fs.writeFileSync(tempPromptFile, '// Write your multi-line prompt here. Save and CLOSE the editor tab when done.\n', 'utf-8');
             console.log('📝 Opening VS Code for multi-line input (waiting for you to save and close the tab)...');
             try {

@@ -1,14 +1,26 @@
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
+import { buildProjectMap } from './map-builder.js'; // 👈 Добавлен импорт генератора карты
+
+// Функция для получения динамических путей бэкапов
+function getPaths(targetProject) {
+    const targetAbsolute = path.resolve(process.cwd(), targetProject);
+    const metaAgentDir = path.join(targetAbsolute, '.meta-agent');
+    return {
+        backupDir: path.join(metaAgentDir, 'backups'),
+        sessionPath: path.join(metaAgentDir, 'session.md'),
+        targetAbsolute
+    };
+}
 
 export async function applyPatches(targetProject, filesToUpdate = [], filesToDelete = []) {
-    const backupDir = path.join(process.cwd(), '.agent_backup');
+    const { backupDir, targetAbsolute } = getPaths(targetProject);
     if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
 
     // 1. Обработка обновлений/созданий файлов
     for (const file of filesToUpdate) {
-        const absolutePath = path.resolve(process.cwd(), targetProject, file.path);
+        const absolutePath = path.join(targetAbsolute, file.path);
         const safeRelativePath = file.path.replace(/[\/\\]/g, '__');
 
         if (fs.existsSync(absolutePath)) {
@@ -16,7 +28,7 @@ export async function applyPatches(targetProject, filesToUpdate = [], filesToDel
             const backupPath = path.join(backupDir, `${safeRelativePath}_${timestamp}.bak`);
             
             fs.copyFileSync(absolutePath, backupPath);
-            console.log(`💾 Backup saved: .agent_backup/${path.basename(backupPath)}`);
+            console.log(`💾 Backup saved: .meta-agent/backups/${path.basename(backupPath)}`);
         } else {
             fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
         }
@@ -29,28 +41,37 @@ export async function applyPatches(targetProject, filesToUpdate = [], filesToDel
 
     // 2. Обработка удалений
     for (const file of filesToDelete) {
-        const absolutePath = path.resolve(process.cwd(), targetProject, file.path);
+        const absolutePath = path.join(targetAbsolute, file.path);
         const safeRelativePath = file.path.replace(/[\/\\]/g, '__');
 
         if (fs.existsSync(absolutePath)) {
-            // Обязательно делаем бэкап перед удалением!
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
             const backupPath = path.join(backupDir, `${safeRelativePath}_${timestamp}.bak`);
             
             fs.copyFileSync(absolutePath, backupPath);
-            console.log(`💾 Backup saved (before delete): .agent_backup/${path.basename(backupPath)}`);
+            console.log(`💾 Backup saved (before delete): .meta-agent/backups/${path.basename(backupPath)}`);
             
-            // Физически удаляем файл
             fs.unlinkSync(absolutePath);
             console.log(`🗑️ File deleted: ${file.path}`);
         } else {
             console.log(`⚠️ Skip deletion: File not found ${file.path}`);
         }
     }
+
+    // 3. Автоматическое обновление карты проекта (ДОБАВЛЕНО)
+    if (filesToUpdate.length > 0 || filesToDelete.length > 0) {
+        try {
+            console.log('[Meta-Agent] 🔄 Обновление карты проекта (PROJECT_MAP.md)...');
+            buildProjectMap();
+        } catch (err) {
+            console.error('⚠️ Ошибка при обновлении карты проекта:', err.message);
+        }
+    }
 }
 
 export async function abortSessionPatches(targetProject) {
-    const backupDir = path.join(process.cwd(), '.agent_backup');
+    const { backupDir, sessionPath, targetAbsolute } = getPaths(targetProject);
+    
     if (!fs.existsSync(backupDir)) {
         console.log('⚠️ No backups found for rollback.');
         return;
@@ -62,13 +83,11 @@ export async function abortSessionPatches(targetProject) {
         return;
     }
 
-    // --- ЛОГИКА REDO: Сохраняем "грязный" слепок перед откатом ---
     const redoDir = path.join(backupDir, 'redo');
     if (fs.existsSync(redoDir)) fs.rmSync(redoDir, { recursive: true, force: true });
     fs.mkdirSync(redoDir, { recursive: true });
 
-    // Прячем память ИИ
-    const sessionPath = path.join(process.cwd(), '.agent_session.tmp');
+    // Прячем актуальную память ИИ перед откатом
     if (fs.existsSync(sessionPath)) {
         fs.copyFileSync(sessionPath, path.join(redoDir, 'session.bak'));
     }
@@ -88,10 +107,10 @@ export async function abortSessionPatches(targetProject) {
         const oldestBackup = backupFiles[0];
 
         const relativePath = safeRelativePath.replace(/__/g, '/');
-        const absolutePath = path.resolve(process.cwd(), targetProject, relativePath);
+        const absolutePath = path.resolve(targetAbsolute, relativePath);
         const oldestBackupPath = path.join(backupDir, oldestBackup);
 
-        // Прячем измененный файл
+        // Прячем измененный файл для функции redo
         if (fs.existsSync(absolutePath)) {
             fs.copyFileSync(absolutePath, path.join(redoDir, `${safeRelativePath}.redo`));
         }
@@ -106,30 +125,31 @@ export async function abortSessionPatches(targetProject) {
 }
 
 export async function applyRedoPatches(targetProject) {
-    const redoDir = path.join(process.cwd(), '.agent_backup', 'redo');
+    const { backupDir, sessionPath, targetAbsolute } = getPaths(targetProject);
+    const redoDir = path.join(backupDir, 'redo');
+    
     if (!fs.existsSync(redoDir)) {
         console.log('⚠️ Nothing to redo.');
-        return false; // <-- Возвращаем false
+        return false;
     }
 
     const files = fs.readdirSync(redoDir);
     if (files.length === 0) {
         console.log('⚠️ Nothing to redo.');
-        return false; // <-- Возвращаем false
+        return false;
     }
 
     for (const file of files) {
         // Восстанавливаем память ИИ
         if (file === 'session.bak') {
-            fs.copyFileSync(path.join(redoDir, file), path.join(process.cwd(), '.agent_session.tmp'));
+            fs.copyFileSync(path.join(redoDir, file), sessionPath);
             continue;
         }
 
-        // Восстанавливаем файлы кода
         if (file.endsWith('.redo')) {
             const safeRelativePath = file.replace('.redo', '');
             const relativePath = safeRelativePath.replace(/__/g, '/');
-            const absolutePath = path.resolve(process.cwd(), targetProject, relativePath);
+            const absolutePath = path.resolve(targetAbsolute, relativePath);
 
             fs.copyFileSync(path.join(redoDir, file), absolutePath);
             console.log(`⏩ Redo applied: ${relativePath}`);
@@ -137,13 +157,15 @@ export async function applyRedoPatches(targetProject) {
         }
     }
 
-    // Зачищаем тайник, чтобы нельзя было применить redo дважды
     fs.rmSync(redoDir, { recursive: true, force: true });
-    return true; // <-- Возвращаем true при успехе
+    return true;
 }
 
 export function clearSessionBackups() {
-    const backupDir = path.join(process.cwd(), '.agent_backup');
+    const configPath = path.join(process.cwd(), "meta.config.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const { backupDir } = getPaths(config.workspace.targetProject);
+    
     if (!fs.existsSync(backupDir)) return;
     
     const archiveDir = path.join(backupDir, 'archive');

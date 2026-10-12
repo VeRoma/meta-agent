@@ -7,7 +7,7 @@ let logTailInterval = null;
 
 export function runDevServer(targetPath, onErrorCallback) {
     if (currentProcess) {
-        console.log("\n⚠️ Сервер уже запущен. Введите /stop для остановки.");
+        console.log("\n⚠️ Процесс уже запущен. Введите /stop для остановки.");
         return;
     }
 
@@ -31,11 +31,11 @@ export function runDevServer(targetPath, onErrorCallback) {
         }
     }
 
-    console.log(`\n🚀 Запускаю сервер в: ${runPath}`);
+    console.log(`\n🚀 Запускаю процесс в: ${runPath}`);
 
     const processOutput = (data) => {
         const output = data.toString();
-        process.stdout.write(`[SERVER] ${output}`);
+        process.stdout.write(`[TARGET] ${output}`);
         
         const lowerOutput = output.toLowerCase();
         if ((lowerOutput.includes('error') && !lowerOutput.includes('0 errors')) || 
@@ -80,7 +80,26 @@ export function runDevServer(targetPath, onErrorCallback) {
 
     } else {
         // --- РЕЖИМ NODE.JS ---
-        currentProcess = spawn('npm', ['run', 'dev'], { cwd: runPath, shell: true });
+        let runCmd = 'dev'; // Значение по умолчанию
+        
+        const pkgPath = path.join(runPath, 'package.json');
+        if (fs.existsSync(pkgPath)) {
+            try {
+                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+                if (pkg.scripts) {
+                    // Ищем доступные скрипты в порядке приоритета
+                    if (pkg.scripts.dev) runCmd = 'dev';
+                    else if (pkg.scripts.start) runCmd = 'start';
+                    else if (pkg.scripts.agent) runCmd = 'agent';
+                }
+            } catch(e) {
+                console.log("⚠️ Ошибка чтения package.json целевого проекта");
+            }
+        }
+        
+        console.log(`⚙️ Выполняю npm run ${runCmd}...`);
+        
+        currentProcess = spawn('npm', ['run', runCmd], { cwd: runPath, shell: true });
         currentProcess.stdout.on('data', processOutput);
         currentProcess.stderr.on('data', processOutput);
         currentProcess.on('close', () => { currentProcess = null; });
@@ -89,7 +108,7 @@ export function runDevServer(targetPath, onErrorCallback) {
 
 export function stopDevServer() {
     if (currentProcess) {
-        console.log("\n🛑 Убиваю процесс сервера...");
+        console.log("\n🛑 Убиваю целевой процесс...");
         if (currentProcess.isJava) {
             try {
                 execSync('powershell -ExecutionPolicy Bypass -File .\\stop.ps1', { cwd: currentProcess.runPath, stdio: 'ignore' });
@@ -104,6 +123,6 @@ export function stopDevServer() {
         }
         currentProcess = null;
     } else {
-        console.log("\n⚠️ Нет запущенных серверов.");
+        console.log("\n⚠️ Нет запущенных процессов.");
     }
 }

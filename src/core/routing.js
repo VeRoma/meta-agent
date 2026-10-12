@@ -1,34 +1,24 @@
 import fs from 'fs';
 import path from 'path';
-import { getProjectFiles } from '../fs/file-manager.js';
-import { askModel, askLocalModel } from './llm.js';
-import { getSession } from './session.js'; // <-- Добавили доступ к памяти
+import { askLocalModel } from './llm.js';
+import { getSession } from './session.js';
 
 /**
  * Запрашивает у диспетчера список релевантных файлов для задачи
  */
 export async function determineRelevantFiles(userQuery, targetPath) {
-    console.log('⚡ Диспетчер (Локальная сеть / Gemma 3) определяет нужные файлы...');
-    const allFiles = getProjectFiles(targetPath);
+    console.log('⚡ Диспетчер (Локальная сеть / Gemma 3) анализирует PROJECT_MAP.md...');
     
-    // 1. Собираем метаданные файлов для умной маршрутизации
-    let metaContext = "AVAILABLE FILES AND THEIR METADATA:\n";
-
-    for (const file of allFiles) {
-        const absoluteFilePath = path.resolve(process.cwd(), targetPath, file);
-        const ext = path.extname(absoluteFilePath);
-        const baseName = path.basename(absoluteFilePath, ext);
-        const dirName = path.dirname(absoluteFilePath);
-        const metaPath = path.join(dirName, `${baseName}.meta.json`);
-
-        if (fs.existsSync(metaPath)) {
-            try {
-                const metaData = fs.readFileSync(metaPath, 'utf-8');
-                metaContext += `\nFile: ${file}\nMetadata: ${metaData}\n`;
-            } catch (e) {}
-        } else {
-            metaContext += `\nFile: ${file} (No metadata available)\n`;
-        }
+    const targetAbsolute = path.resolve(process.cwd(), targetPath);
+    const mapPath = path.join(targetAbsolute, 'PROJECT_MAP.md');
+    
+    // 1. Читаем единую карту проекта вместо сотен meta.json
+    let projectMapContext = "PROJECT MAP UNAVAILABLE. NO FILES INDEXED.";
+    
+    if (fs.existsSync(mapPath)) {
+        projectMapContext = fs.readFileSync(mapPath, 'utf-8');
+    } else {
+        console.warn('⚠️ Внимание: PROJECT_MAP.md не найден. Убедитесь, что карта сгенерирована.');
     }
 
     // 2. Достаем историю текущей сессии
@@ -37,9 +27,10 @@ export async function determineRelevantFiles(userQuery, targetPath) {
     // 3. Строгий англоязычный промпт для Диспетчера
     const prompt = `
 You are a smart file router for a codebase.
-Based on the USER PROMPT and the CURRENT CHAT SESSION, identify which files need to be analyzed or modified.
+Based on the USER PROMPT and the CURRENT CHAT SESSION, identify which files from the PROJECT MAP need to be analyzed or modified.
 
-${metaContext}
+PROJECT MAP:
+${projectMapContext}
 
 CURRENT CHAT SESSION (Context for the request):
 ${sessionContext || "No previous context."}
@@ -48,26 +39,32 @@ USER PROMPT:
 ${userQuery}
 
 CRITICAL INSTRUCTIONS:
-1. Return ONLY a valid JSON array of strings representing the exact file paths as they appear in the "File:" lines above.
-2. Do not use markdown wrappers like \`\`\`json.
-3. If no files are needed, return an empty array [].
+1. Return ONLY a valid JSON array of strings representing the exact file paths.
+2. Only select files that are explicitly listed in the PROJECT MAP.
+3. Do not use markdown wrappers like \`\`\`json or add any conversational text.
+4. If no files are needed or relevant, return an empty array [].
 `;
 
     try {
-        // === ВАЖНО: Вызываем ЛОКАЛЬНУЮ модель (Ollama) ===
+        // === ВАЖНО: Вызываем ЛОКАЛЬНУЮ модель (Gemma 3) ===
         const response = await askLocalModel(prompt); 
         
         // Очищаем ответ от возможного маркдауна
         const cleanJson = response.replace(/```json/g, '').replace(/```/g, '').trim();
-        const selectedFiles = JSON.parse(cleanJson);
+        
+        // Дополнительная защита: вытаскиваем только массив, если модель добавила лишний текст
+        const arrayMatch = cleanJson.match(/\[.*\]/s);
+        const finalJsonString = arrayMatch ? arrayMatch[0] : cleanJson;
+
+        const selectedFiles = JSON.parse(finalJsonString);
         
         if (Array.isArray(selectedFiles)) {
             return selectedFiles;
         }
         return [];
     } catch (error) {
-        console.error('❌ Ошибка диспетчера:', error.message);
-        // Возвращаем пустой массив при ошибке, чтобы не переполнять контекст Pro-модели
+        console.error('❌ Ошибка диспетчера (сбой парсинга JSON или таймаут):', error.message);
+        // Возвращаем пустой массив при ошибке, чтобы не переполнять контекст Executor'а
         return []; 
     }
 }
