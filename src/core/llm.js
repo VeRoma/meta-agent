@@ -1,82 +1,59 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+
+import { askLocalModel } from './llm/ollama.js';
+import { askDeepSeek } from './llm/deepseek.js';
+import { initClaude, askClaude } from './llm/claude.js';
 
 dotenv.config();
 
 const configPath = path.join(process.cwd(), 'meta.config.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Инициализируем Claude (SDK)
+initClaude(process.env.CLAUDE_API_KEY);
 
-const executorModel = genAI.getGenerativeModel({ 
-    model: config.llm.executorModel,
-    systemInstruction: config.prompts ? config.prompts.systemRole : "You are an AI assistant."
-});
-
-const dispatcherModel = genAI.getGenerativeModel({ 
-    model: config.llm.dispatcherModel 
-});
-
-// Настройки локального сервера Ollama
-const OLLAMA_ENDPOINT = 'http://127.0.0.1:11434/api/generate';
-const LOCAL_MODEL = config.llm.fallbackModel; 
-
-/**
- * Отправляет запрос к облачной LLM (Gemini) с автоматическим фоллбэком на Ollama
- */
 export async function askModel(prompt, useDispatcher = false) {
-    const model = useDispatcher ? dispatcherModel : executorModel;
-    
-    try {
-        const result = await model.generateContent(prompt);
-        return result.response.text();
-    } catch (error) {
-        const errorMessage = error.message.toLowerCase();
-        
-        // Если ловим 429 (лимиты) или ошибки нагрузки — переключаемся на локалку
-        if (error.status === 429 || errorMessage.includes('429') || errorMessage.includes('resource_exhausted') || errorMessage.includes('overloaded')) {
-            console.warn(`\n⚠️ [Meta-Agent] Облако Gemini недоступно (Rate Limit). Переключаюсь на локальную модель ${LOCAL_MODEL}...`);
-            return await askLocalModel(prompt);
+    let targetModel = useDispatcher ? config.llm.dispatcherModel : config.llm.executorModel;
+    const systemRole = !useDispatcher && config.prompts?.systemRole ? config.prompts.systemRole : null;
+
+    if (!useDispatcher) {
+        const lowerPrompt = prompt.toLowerCase();
+        if (lowerPrompt.includes('@7b') || lowerPrompt.includes('используй 7b')) {
+            targetModel = 'qwen2.5-coder:7b-instruct';
+            console.log('🔄 Переопределение: принудительно выбран Qwen-7B');
+        } else if (lowerPrompt.includes('@ds') || lowerPrompt.includes('используй ds') || lowerPrompt.includes('@deepseek')) {
+            targetModel = 'deepseek-chat';
+            console.log('🔄 Переопределение: принудительно выбран DeepSeek');
+        } else if (lowerPrompt.includes('@claude') || lowerPrompt.includes('используй claude')) {
+            targetModel = 'claude-sonnet-5-5';
+            console.log('🔄 Переопределение: принудительно выбран Claude');
         }
-        
-        console.error('\n❌ Ошибка API Gemini:', error.message);
-        throw error; // Если ошибка не связана с лимитами (например, неверный API ключ), выбрасываем её дальше
+    }
+
+    try {
+        if (targetModel.includes('qwen') || targetModel.includes('llama')) {
+            return await askLocalModel(prompt, targetModel);
+        } else if (targetModel.includes('deepseek')) {
+            return await askDeepSeek(prompt, systemRole, targetModel);
+        } else if (targetModel.includes('claude')) {
+            return await askClaude(prompt, systemRole, targetModel, "high");
+        } else {
+            throw new Error(`Неизвестное семейство моделей: ${targetModel}`);
+        }
+    } catch (error) {
+        console.error(`\n❌ [ОШИБКА LLM | ${targetModel}]:`, error.message);
+        console.warn(`🚨 Переключаюсь на локальный фоллбек...`);
+        return await askLocalModel(prompt, config.llm.heavyFallbackModel || "qwen2.5-coder:7b-instruct");
     }
 }
 
-/**
- * Прямой запрос к рабочей локальной модели через Ollama
- */
-export async function askLocalModel(prompt) {
+export async function translateToEnglish(russianText) {
+    const prompt = `Translate to clear technical English. Return ONLY English text, no explanations, no quotes.\n\nText:\n${russianText}`;
     try {
-        console.log(`[Meta-Agent] Отправка запроса в Ollama (${LOCAL_MODEL})...`);
-        
-        const response = await fetch(OLLAMA_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: LOCAL_MODEL,
-                prompt: prompt,
-                stream: false,
-                options: {
-                    num_ctx: 8192 // Увеличиваем контекст до 8192 токенов
-                }
-            }),
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP статус ${response.status}`);
-        }
-
-        const data = await response.json();
-        return data.response || '';
-        
-    } catch (error) {
-        console.error('\n❌ Ошибка локальной модели Ollama:', error.message);
-        throw new Error(`Критический сбой: Облако недоступно, а локальная модель вернула ошибку (${error.message})`);
+        return await askLocalModel(prompt, config.llm.fallbackModel);
+    } catch {
+        return russianText; 
     }
 }

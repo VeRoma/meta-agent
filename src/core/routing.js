@@ -1,18 +1,18 @@
 import fs from 'fs';
 import path from 'path';
-import { askLocalModel } from './llm.js';
+import { askModel, translateToEnglish } from './llm.js';
 import { getSession } from './session.js';
 
 /**
  * Запрашивает у диспетчера список релевантных файлов для задачи
  */
 export async function determineRelevantFiles(userQuery, targetPath) {
-    console.log('⚡ Диспетчер (Локальная сеть / Gemma 3) анализирует PROJECT_MAP.md...');
+    console.log('⚡ Диспетчер (Облако / Gemini Flash) анализирует PROJECT_MAP.md...');
     
     const targetAbsolute = path.resolve(process.cwd(), targetPath);
     const mapPath = path.join(targetAbsolute, 'PROJECT_MAP.md');
     
-    // 1. Читаем единую карту проекта вместо сотен meta.json
+    // 1. Читаем единую карту проекта вместо сотен файлов
     let projectMapContext = "PROJECT MAP UNAVAILABLE. NO FILES INDEXED.";
     
     if (fs.existsSync(mapPath)) {
@@ -24,7 +24,10 @@ export async function determineRelevantFiles(userQuery, targetPath) {
     // 2. Достаем историю текущей сессии
     const sessionContext = getSession();
 
-    // 3. Строгий англоязычный промпт для Диспетчера
+    // 3. Пытаемся перевести запрос на английский (если локалка жива)
+    const translatedQuery = await translateToEnglish(userQuery);
+
+    // 4. Строгий англоязычный промпт для Диспетчера
     const prompt = `
 You are a smart file router for a codebase.
 Based on the USER PROMPT and the CURRENT CHAT SESSION, identify which files from the PROJECT MAP need to be analyzed or modified.
@@ -36,7 +39,7 @@ CURRENT CHAT SESSION (Context for the request):
 ${sessionContext || "No previous context."}
 
 USER PROMPT:
-${userQuery}
+${translatedQuery}
 
 CRITICAL INSTRUCTIONS:
 1. Return ONLY a valid JSON array of strings representing the exact file paths.
@@ -46,8 +49,8 @@ CRITICAL INSTRUCTIONS:
 `;
 
     try {
-        // === ВАЖНО: Вызываем ЛОКАЛЬНУЮ модель (Gemma 3) ===
-        const response = await askLocalModel(prompt); 
+        // === ВАЖНО: Вызываем ОБЛАЧНУЮ модель диспетчера (Gemini Flash) ===
+        const response = await askModel(prompt, true); 
         
         // Очищаем ответ от возможного маркдауна
         const cleanJson = response.replace(/```json/g, '').replace(/```/g, '').trim();

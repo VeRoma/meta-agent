@@ -1,0 +1,153 @@
+import Anthropic from '@anthropic-ai/sdk';
+import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const configPath = path.join(process.cwd(), 'meta.config.json');
+const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+const anthropic = process.env.CLAUDE_API_KEY ? new Anthropic({ apiKey: process.env.CLAUDE_API_KEY }) : null;
+const OLLAMA_ENDPOINT = 'http://127.0.0.1:11434/api/generate';
+const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/chat/completions';
+
+/**
+ * Главный роутер Мета-Агента с поддержкой тегов в промпте
+ */
+export async function askModel(prompt, useDispatcher = false) {
+    let targetModel = useDispatcher ? config.llm.dispatcherModel : config.llm.executorModel;
+    const systemRole = !useDispatcher && config.prompts?.systemRole ? config.prompts.systemRole : null;
+
+    // --- ДИНАМИЧЕСКИЙ ВЫБОР МОДЕЛИ ЧЕРЕЗ ТЕГИ ---
+    if (!useDispatcher) {
+        const lowerPrompt = prompt.toLowerCase();
+        if (lowerPrompt.includes('@7b') || lowerPrompt.includes('используй 7b')) {
+            targetModel = 'qwen2.5-coder:7b-instruct';
+            console.log('🔄 Переопределение: принудительно выбран Qwen-7B');
+        } else if (lowerPrompt.includes('@ds') || lowerPrompt.includes('используй ds') || lowerPrompt.includes('@deepseek')) {
+            targetModel = 'deepseek-chat'; // Стандартное API-имя для V3
+            console.log('🔄 Переопределение: принудительно выбран DeepSeek');
+        } else if (lowerPrompt.includes('@claude') || lowerPrompt.includes('используй claude')) {
+            targetModel = 'claude-sonnet-5-5';
+            console.log('🔄 Переопределение: принудительно выбран Claude');
+        }
+    }
+
+    try {
+        if (targetModel.includes('qwen') || targetModel.includes('llama')) {
+            return await askLocalModel(prompt, targetModel);
+        } else if (targetModel.includes('deepseek')) {
+            return await askDeepSeek(prompt, systemRole, targetModel);
+        } else if (targetModel.includes('claude')) {
+            return await askClaude(prompt, systemRole, targetModel, "high");
+        } else {
+            throw new Error(`Неизвестное семейство моделей: ${targetModel}`);
+        }
+    } catch (error) {
+        console.error(`\n❌ [ОШИБКА LLM | ${targetModel}]:`, error.message);
+        console.warn(`🚨 Переключаюсь на локальный фоллбек...`);
+        return await askLocalModel(prompt, config.llm.heavyFallbackModel || "qwen2.5-coder:7b-instruct");
+    }
+}
+
+/**
+ * Адаптер для локальной Ollama
+ */
+export async function askLocalModel(prompt, targetModel) {
+    console.log(`[Meta-Agent] Запрос к локальной модели (${targetModel})...`);
+    const response = await fetch(OLLAMA_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model: targetModel,
+            prompt: prompt,
+            stream: false,
+            options: { num_ctx: 8192, num_gpu: 0 }
+        }),
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    return data.response || '';
+}
+
+/**
+ * Адаптер для DeepSeek (с защитой от зависаний и логированием)
+ */
+async function askDeepSeek(prompt, systemRole, model) {
+    console.log(`[Meta-Agent] 🐳 Запрос к облаку DeepSeek (${model}). Ждем ответа...`);
+    
+    const messages = [];
+    if (systemRole) messages.push({ role: "system", content: systemRole });
+    messages.push({ role: "user", content: prompt });
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // Таймаут 60 сек
+
+    try {
+        const response = await fetch(DEEPSEEK_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
+            },
+            body: JSON.stringify({ model: model, messages: messages, temperature: 0.2 }),
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`API Error: ${response.status} - ${errText}`);
+        }
+
+        const data = await response.json();
+        
+        // Защита от кривых JSON-ответов DeepSeek
+        if (!data.choices || !data.choices[0]) {
+            console.error("🚨 Странный ответ от DeepSeek:", JSON.stringify(data, null, 2));
+            throw new Error("DeepSeek вернул пустой или нестандартный ответ (нет поля choices).");
+        }
+
+        return data.choices[0].message.content;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError' || error.message.includes('abort')) {
+            throw new Error('Таймаут: DeepSeek не ответил за 60 секунд.');
+        }
+        throw error;
+    }
+}
+
+/**
+ * Адаптер для Claude 
+ */
+async function askClaude(prompt, systemRole, model, effort = "high") {
+    if (!anthropic) throw new Error("CLAUDE_API_KEY не найден в .env!");
+    console.log(`[Meta-Agent] 🧠 Запрос к Claude (${model})...`);
+    
+    const requestParams = {
+        model: model,
+        max_tokens: 8000,
+        thinking: { type: "adaptive" },
+        output_config: { effort: effort },
+        messages: [{ role: "user", content: prompt }]
+    };
+
+    if (systemRole) requestParams.system = systemRole;
+
+    const response = await anthropic.messages.create(requestParams);
+    const textBlock = response.content.find(block => block.type === 'text');
+    return textBlock ? textBlock.text : '';
+}
+
+export async function translateToEnglish(russianText) {
+    const prompt = `Translate to clear technical English. Return ONLY English text, no explanations, no quotes.\n\nText:\n${russianText}`;
+    try {
+        return await askLocalModel(prompt, config.llm.fallbackModel);
+    } catch {
+        return russianText; 
+    }
+}

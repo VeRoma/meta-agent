@@ -1,0 +1,7 @@
+// src/core/llm.js
+
+import { askLocalModel, OLLAMA_ENDPOINT } from './llm/ollama.js';
+
+export async function askModel(prompt, useDispatcher = false) {
+  // ... (остальной код остается без изменений) ...
+}

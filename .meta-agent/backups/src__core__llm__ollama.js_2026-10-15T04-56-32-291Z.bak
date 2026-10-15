@@ -1,0 +1,5 @@
+// src/core/llm/ollama.js
+
+import { askLocalModel, OLLAMA_ENDPOINT } from '../llm.js';
+
+export { askLocalModel, OLLAMA_ENDPOINT };

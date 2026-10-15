@@ -1,22 +1,20 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url'; // Добавили специальный конвертер путей
+import { fileURLToPath } from 'url';
 
 // Игнорируем тяжелые и служебные папки/файлы
-const IGNORE_DIRS = ['node_modules', '.git', 'dist', 'build', 'meta-bot'];
+const IGNORE_DIRS = ['node_modules', '.git', 'dist', 'build', '.meta-agent', 'meta-bot'];
 const IGNORE_FILES = ['.env', 'package-lock.json', 'package.json', '.meta_prompt.tmp', '.gitignore', '.metaignore'];
 
-// Очистка JSDoc комментариев от звездочек и переносов строк
 // Очистка JSDoc: убираем звездочки, отсекаем @param/@returns и БЛОКИРУЕМ РУССКИЙ ЯЗЫК
 function cleanJSDoc(rawComment) {
     if (!rawComment) return '';
     const cleaned = rawComment
         .split('\n')
-        .map(line => line.replace(/^\s*\*\s?/, '').trim()) // Убираем начальные звездочки
-        .filter(line => line.length > 0 && !line.startsWith('@')) // Убиваем @param и @returns
+        .map(line => line.replace(/^\s*\*\s?/, '').trim())
+        .filter(line => line.length > 0 && !line.startsWith('@'))
         .join(' - '); 
 
-    // Если находим хоть одну русскую букву — возвращаем пустую строку
     if (/[а-яА-ЯЁё]/.test(cleaned)) {
         return ''; 
     }
@@ -26,6 +24,8 @@ function cleanJSDoc(rawComment) {
 
 // Рекурсивный обход директорий
 function walkDirectory(dir, fileList = []) {
+    if (!fs.existsSync(dir)) return fileList;
+    
     const files = fs.readdirSync(dir);
 
     for (const file of files) {
@@ -48,7 +48,6 @@ function analyzeFile(filePath) {
     const content = fs.readFileSync(filePath, 'utf-8');
     const nodes = [];
 
-    // Ищет JSDoc перед экпортами функций, констант и классов
     const exportRegex = /(?:\/\*\*([\s\S]*?)\*\/\s*)?export\s+(async\s+)?(function|const|class)\s+([a-zA-Z0-9_]+)/g;
     let match;
 
@@ -73,14 +72,25 @@ function analyzeFile(filePath) {
 
 // Главная функция сборки
 export function buildProjectMap() {
-    const rootDir = process.cwd();
-    const jsFiles = walkDirectory(rootDir);
+    // Читаем конфиг, чтобы узнать, где лежит целевой проект
+    const configPath = path.join(process.cwd(), "meta.config.json");
+    let targetDir = process.cwd(); // фоллбек на текущую папку
+    
+    if (fs.existsSync(configPath)) {
+        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        if (config.workspace && config.workspace.targetProject) {
+            targetDir = path.resolve(process.cwd(), config.workspace.targetProject);
+        }
+    }
+
+    console.log(`🔍 Сканирую директорию: ${targetDir}`);
+    const jsFiles = walkDirectory(targetDir);
     
     let markdown = `# META-AGENT Project Map\n\n`;
     markdown += `> This map contains the structural overview of exported modules to help the LLM navigate the codebase efficiently.\n\n`;
 
     for (const file of jsFiles) {
-        const relativePath = path.relative(rootDir, file).replace(/\\/g, '/');
+        const relativePath = path.relative(targetDir, file).replace(/\\/g, '/');
         const nodes = analyzeFile(file);
 
         markdown += `### 📄 ${relativePath}\n`;
@@ -91,7 +101,7 @@ export function buildProjectMap() {
         }
     }
 
-    const outputPath = path.join(rootDir, 'PROJECT_MAP.md');
+    const outputPath = path.join(targetDir, 'PROJECT_MAP.md');
     fs.writeFileSync(outputPath, markdown);
     console.log(`✅ Project map successfully generated at ${outputPath}`);
 }

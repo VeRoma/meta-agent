@@ -2,8 +2,10 @@ import readline from "readline";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
+import { buildProjectMap } from '../fs/map-builder.js';
 
-import { getProjectFiles, readFilesContent, generateProjectTree } from "../fs/file-manager.js";
+// УБРАНЫ ТЯЖЕЛЫЕ ФУНКЦИИ (getProjectFiles, generateProjectTree)
+import { readFilesContent } from "../fs/file-manager.js";
 import {
     initSession,
     appendToSession,
@@ -13,9 +15,10 @@ import {
 } from "../core/session.js";
 import { askModel } from "../core/llm.js";
 import { determineRelevantFiles } from "../core/routing.js";
-import { generateDocumentation, generateIndexes } from '../fs/docs-generator.js';
+import { generateDocumentation } from '../fs/docs-generator.js';
 import { applyPatches, abortSessionPatches, clearSessionBackups, applyRedoPatches } from '../fs/patcher.js';
 import { runLinter } from '../core/linter.js';
+import { runTests } from '../core/tester.js';
 import { runDevServer, stopDevServer } from './runner.js';
 
 const configPath = path.join(process.cwd(), "meta.config.json");
@@ -48,7 +51,7 @@ async function handleCommand(command) {
             console.log('\n💾 Starting save process...');
             const currentSession = getSession();
             await generateDocumentation(config.workspace.targetProject, currentSession);
-            await generateIndexes(config.workspace.targetProject);
+            
             clearSession();
             clearSessionBackups();
             initSession('New audit task (waiting...)');
@@ -56,7 +59,8 @@ async function handleCommand(command) {
             break;
             
         case "/index":
-            await generateIndexes(config.workspace.targetProject);
+            console.log("\n🗺️ Генерация карты проекта (мгновенно, без LLM)...");
+            buildProjectMap();
             break;
             
         case "/abort":
@@ -96,15 +100,28 @@ export async function processAgentTask(text) {
     appendToSession("user", text);
 
     try {
+        const targetAbsolute = path.resolve(process.cwd(), config.workspace.targetProject);
+        const mapPath = path.join(targetAbsolute, 'PROJECT_MAP.md');
+        
+        let projectMapContent = "PROJECT MAP UNAVAILABLE.";
+        let allProjectFiles = [];
+
+        // 1. Читаем легкую карту проекта вместо сканирования жесткого диска
+        if (fs.existsSync(mapPath)) {
+            projectMapContent = fs.readFileSync(mapPath, 'utf-8');
+            // Парсим пути файлов прямо из карты для проверки @упоминаний
+            allProjectFiles = projectMapContent
+                .split('\n')
+                .filter(line => line.startsWith('### 📄 '))
+                .map(line => line.replace('### 📄 ', '').trim());
+        }
+
         const mentionRegex = /@([a-zA-Z0-9_.\-\/]+)/g;
         const mentions = [...text.matchAll(mentionRegex)].map(m => m[1]);
         
-        // ФИЛЬТР: Meta-Agent не должен видеть или редактировать файлы внутри .meta-agent (собственную память)
-        let allProjectFiles = getProjectFiles(config.workspace.targetProject);
-        allProjectFiles = allProjectFiles.filter(f => !f.includes('.meta-agent'));
-
         let forcedFiles = [];
 
+        // 2. Обработка прямых упоминаний файлов
         if (mentions.length > 0) {
             for (const mention of mentions) {
                 const matched = allProjectFiles.find(f => {
@@ -118,11 +135,12 @@ export async function processAgentTask(text) {
                     forcedFiles.push(matched);
                     console.log(`📌 Explicitly included: ${mention}`);
                 } else {
-                    console.log(`⚠️ Mentioned file not found (or access restricted): ${mention}`);
+                    console.log(`⚠️ Mentioned file not found in PROJECT_MAP: ${mention}`);
                 }
             }
         }
 
+        // 3. Вызов локального Диспетчера (Gemma 3)
         let relevantFiles = await determineRelevantFiles(text, config.workspace.targetProject);
         relevantFiles = [...new Set([...forcedFiles, ...relevantFiles])];
 
@@ -135,26 +153,25 @@ export async function processAgentTask(text) {
         const maxHealingAttempts = 3;
 
         while (healingAttempts <= maxHealingAttempts) {
-            const targetAbsolute = path.resolve(process.cwd(), config.workspace.targetProject);
+            // 4. Загружаем ТОЛЬКО нужные файлы, выбранные диспетчером
             const filesContext = readFilesContent(relevantFiles, targetAbsolute);
             const sessionContext = getSession();
-            const projectTree = generateProjectTree(config.workspace.targetProject);
 
-            // Динамически подтягиваем системную роль из конфига
             const systemRole = config.prompts ? config.prompts.systemRole : "You are Meta-Agent, an autonomous AI Overseer.";
 
+            // 5. Передаем карту проекта вместо тяжелого древовидного лога
             const prompt = `
-PROJECT STRUCTURE (Target: ${config.workspace.targetProject}):
-${projectTree}
+PROJECT MAP (Architectural Overview for ${config.workspace.targetProject}):${projectMapContent}
 
-CODE CONTEXT:
+CODE CONTEXT (Files selected for this task):
 ${filesContext || "No files required."}
 
 CURRENT SESSION:
 ${sessionContext}
 
 CRITICAL INSTRUCTIONS (READ CAREFULLY):
-1. ${systemRole}
+1. 
+${systemRole}
 2. You MUST respond ONLY with a valid JSON object. Do not use markdown wrappers like \`\`\`json.
 3. AUTONOMOUS FILE READING: If you need to read a file that is not in the CODE CONTEXT, use "chat" mode and mention the file with an @ prefix (e.g., "@agent.js"). The system will fetch it.
 4. THE "DO NO HARM" RULE: Preserve original formatting, logic, and comments. DO NOT modify files in the .meta-agent directory.
@@ -195,6 +212,23 @@ Answer the developer's last message:
             const rawResponse = await askModel(prompt, false);
             const cleanJson = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
             const parsedResponse = JSON.parse(cleanJson);
+
+            if (parsedResponse.message && /^[A-Za-z0-9\s.,!?;:'"()-]+$/.test(parsedResponse.message.slice(0, 50))) {
+                try {
+                    const { askModel: _, askLocalModel } = await import('../core/llm.js');
+                    const configPathLocal = path.join(process.cwd(), 'meta.config.json');
+                    const cfgLocal = JSON.parse(fs.readFileSync(configPathLocal, 'utf-8'));
+                    const heavyModel = cfgLocal.llm.heavyFallbackModel || cfgLocal.llm.fallbackModel;
+                    
+                    const translationPrompt = `Translate the following technical agent response into natural Russian. Keep code snippets, file paths, and technical terms intact:\n\n${parsedResponse.message}`;
+                    const translatedMsg = await askLocalModel(translationPrompt, heavyModel);
+                    if (translatedMsg && translatedMsg.trim()) {
+                        parsedResponse.message = translatedMsg.trim();
+                    }
+                } catch (trErr) {
+                    // Если локальный переводчик занят, оставляем оригинальное сообщение
+                }
+            }
 
             const triggerRestartIfNeeded = () => {
                 if (parsedResponse.restartServer) {
@@ -252,12 +286,8 @@ Answer the developer's last message:
 
                 if (commandsToRun.length > 0) {
                     console.log(`\n⚙️ Meta-Agent выполняет команды в целевой директории:`);
-                    // Изменено: const cmd заменен на let cmd
                     for (let cmd of commandsToRun) {
-                        
-                        // ПАТЧ ДЛЯ WINDOWS: принудительно экранируем одинарные кавычки в git commit
                         cmd = cmd.replace(/git commit -m '([^']+)'/g, 'git commit -m "$1"');
-
                         console.log(`\n   > ${cmd}`);
                         console.log(`⏳ Running...`);
                         try {
@@ -280,10 +310,33 @@ Answer the developer's last message:
                     const lintResult = await runLinter(config.workspace.targetProject, toUpdate);
 
                     if (lintResult.success) {
-                        console.log("✨ Проверка пройдена! Код чист.");
-                        appendToSession("agent", `[PATCH APPLIED SUCCESSFULLY]: ${parsedResponse.message}`);
-                        triggerRestartIfNeeded();
-                        break; 
+                        console.log("✅ Линтер пройден. Запуск юнит-тестов...");
+                        const testResult = await runTests(config.workspace.targetProject);
+
+                        if (testResult.success) {
+                            console.log("✨ Линтер и тесты пройдены успешно! Код чист.");
+                            appendToSession("agent", `[PATCH APPLIED SUCCESSFULLY]: ${parsedResponse.message}`);
+                            triggerRestartIfNeeded();
+                            break; 
+                        } else {
+                            healingAttempts++;
+                            
+                            if (healingAttempts > maxHealingAttempts) {
+                                console.log("❌ Авто-исправление не удалось. Требуется ручное вмешательство.");
+                                console.log(`\nTest Output:\n${testResult.output}\n`);
+                                appendToSession("agent", `[PATCH APPLIED BUT TESTS FAILED]: ${parsedResponse.message}`);
+                                break;
+                            }
+
+                            console.log("⚠️ Линтер пройден, но юнит-тесты упали. Запуск модуля исправления...");
+                            
+                            const absoluteUpdatedPaths = toUpdate.map(f => path.resolve(process.cwd(), config.workspace.targetProject, f.path));
+                            relevantFiles = [...new Set([...relevantFiles, ...absoluteUpdatedPaths])];
+
+                            appendToSession("agent", `[PATCH APPLIED WITH ERRORS]: ${parsedResponse.message}`);
+                            const errorPrompt = `[SYSTEM ERROR] Tests failed on the code you just wrote. Fix these errors in 'patch' mode:\n\n${testResult.output}`;
+                            appendToSession("user", errorPrompt);
+                        }
                     } else {
                         healingAttempts++;
                         

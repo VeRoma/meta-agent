@@ -5,6 +5,9 @@
 ### 📄 meta-agent.js
 - (Internal logic / No exported modules)
 
+### 📄 src/.eslintrc.js
+- (Internal logic / No exported modules)
+
 ### 📄 src/cli/chat.js
 - **startCLI** (async function)
 - **processAgentTask** (async function)
@@ -16,9 +19,11 @@
 ### 📄 src/core/linter.js
 - **runLinter** (async function)
 
+### 📄 src/core/llm/ollama.js
+- (Internal logic / No exported modules)
+
 ### 📄 src/core/llm.js
 - **askModel** (async function)
-- **askLocalModel** (async function)
 
 ### 📄 src/core/routing.js
 - **determineRelevantFiles** (async function)
@@ -32,12 +37,9 @@
 
 ### 📄 src/fs/docs-generator.js
 - **generateDocumentation** (async function)
-- **generateIndexes** (async function)
 
 ### 📄 src/fs/file-manager.js
-- **getProjectFiles** (function)
 - **readFilesContent** (function)
-- **generateProjectTree** (function)
 
 ### 📄 src/fs/map-builder.js
 - **buildProjectMap** (function)
