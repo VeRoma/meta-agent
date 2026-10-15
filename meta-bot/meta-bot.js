@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 
 // Твои реальные ключи доступа
-const TOKEN = '8424663562:AAHqoMdtaVv9PlpjwmyfxVdWikUbGnQ4OlQ';
-const MY_CHAT_ID = 933701082;
+const TOKEN = '1';
+const MY_CHAT_ID = 1;
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
