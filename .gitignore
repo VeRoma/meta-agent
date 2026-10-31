@@ -1,7 +1,14 @@
 node_modules
 .env
+.env.*
+!.env.example
 logs
 *.log
 dist
 build
 .agent_backup/
+
+# Служебные файлы Meta-Agent (память, бэкапы, временные промпты)
+.meta-agent/
+.meta_prompt.tmp
+meta_task.txt

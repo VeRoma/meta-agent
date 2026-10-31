@@ -22,7 +22,7 @@ async function initMetaAgent() {
     const targetPath = config.workspace.targetProject; 
     
     if (!targetPath) {
-        console.error("❌ В agent.config.json не указан targetProject!");
+        console.error("❌ В meta.config.json не указан targetProject!");
         process.exit(1);
     }
 
@@ -35,6 +35,7 @@ async function initMetaAgent() {
 
     // Папка для памяти самого Meta-Agent (чтобы не конфликтовать с логами dev-agent)
     const metaAgentDir = path.join(absoluteTargetPath, '.meta-agent');
+    const { buildProjectMap } = await import('./src/fs/map-builder.js');
 
     // Проверяем, работал ли Meta-Agent с этим проектом раньше
     if (!fs.existsSync(metaAgentDir)) {
@@ -43,14 +44,18 @@ async function initMetaAgent() {
         
         console.log('📚 Подготавливаю аналитический контекст...');
         try {
-            const { generateIndexes } = await import('./src/fs/docs-generator.js');
-            await generateIndexes(targetPath);
+            buildProjectMap(absoluteTargetPath);
             console.log('✅ Первичная индексация завершена!');
-        } catch(e) {
-            console.log('⚠️ Модуль авто-индексации пока не подключен. Пропускаю.');
+        } catch (e) {
+            console.log(`⚠️ Не удалось построить карту проекта: ${e.message}`);
         }
     } else {
         console.log(`\n🔄 Загружаю аналитическую базу проекта: ${path.basename(targetPath)}`);
+        // Карта могла быть удалена вручную — без неё диспетчер слеп
+        if (!fs.existsSync(path.join(absoluteTargetPath, 'PROJECT_MAP.md'))) {
+            console.log('🗺️ PROJECT_MAP.md не найден, строю заново...');
+            try { buildProjectMap(absoluteTargetPath); } catch (e) { console.log(`⚠️ ${e.message}`); }
+        }
     }
 
     // Передаем управление в Chat Loop

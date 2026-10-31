@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 
 let currentProcess = null;
+let lastErrorAt = 0; // антиспам: не дёргаем авто-исправление чаще, чем раз в 5 секунд
 let logTailInterval = null;
 
 export function runDevServer(targetPath, onErrorCallback) {
@@ -43,7 +44,11 @@ export function runDevServer(targetPath, onErrorCallback) {
             lowerOutput.includes('exception') || 
             lowerOutput.includes('build failure')) {
             
-            onErrorCallback(output);
+            const now = Date.now();
+            if (now - lastErrorAt > 5000) {
+                lastErrorAt = now;
+                onErrorCallback(output);
+            }
         }
     };
 
@@ -99,10 +104,12 @@ export function runDevServer(targetPath, onErrorCallback) {
         
         console.log(`⚙️ Выполняю npm run ${runCmd}...`);
         
-        currentProcess = spawn('npm', ['run', runCmd], { cwd: runPath, shell: true });
-        currentProcess.stdout.on('data', processOutput);
-        currentProcess.stderr.on('data', processOutput);
-        currentProcess.on('close', () => { currentProcess = null; });
+        const child = spawn('npm', ['run', runCmd], { cwd: runPath, shell: true });
+        currentProcess = child;
+        child.stdout.on('data', processOutput);
+        child.stderr.on('data', processOutput);
+        // Обнуляем только если это всё ещё ТЕКУЩИЙ процесс (после рестарта старый закрывается позже нового)
+        child.on('close', () => { if (currentProcess === child) currentProcess = null; });
     }
 }
 

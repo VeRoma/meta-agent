@@ -2,10 +2,11 @@
   "name": "meta-agent",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "meta-agent.js",
   "scripts": {
     "start": "node meta-agent.js",
-    "meta": "node meta-agent.js"
+    "meta": "node meta-agent.js",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
@@ -17,5 +18,8 @@
     "ignore": "^7.0.5",
     "leva": "^0.10.1"
   },
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
 }

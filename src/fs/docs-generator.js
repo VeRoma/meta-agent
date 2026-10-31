@@ -28,7 +28,7 @@ ${sessionContext}
         // Используем быструю модель (true) для суммаризации текста
         const summary = await askModel(prompt, true);
         
-        const historyFilePath = path.join(process.cwd(), targetPath, 'HISTORY.md');
+        const historyFilePath = path.resolve(process.cwd(), targetPath, 'HISTORY.md');
         
         // Формируем красивый блок с датой (в формате YYYY-MM-DD)
         const date = new Date().toISOString().split('T')[0];
