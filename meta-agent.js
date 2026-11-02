@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { listAvailableModels, pickProvider } from '@veroma/ai-core';
-import { acquireProjectLock } from './src/core/instance-lock.js';
+import { acquireProjectLock } from '@veroma/ai-core/lock';
 
 let config;
 try {
