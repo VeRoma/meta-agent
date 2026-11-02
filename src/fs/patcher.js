@@ -2,8 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { buildProjectMap } from './map-builder.js';
-import { resolveInside, resolveProjectFile } from './safe-path.js';
-import { validateFileUpdate } from './patch-guard.js';
+import { resolveInside, resolveProjectFile, validateFileUpdate } from '@veroma/ai-core/safety';
 
 // Функция для получения динамических путей бэкапов
 function getPaths(targetProject) {

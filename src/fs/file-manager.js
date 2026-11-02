@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolveInside, isSecretPath } from './safe-path.js';
+import { resolveInside, isSecretPath } from '@veroma/ai-core/safety';
 
 /**
  * Читает содержимое переданных файлов и формирует единый текстовый контекст.
