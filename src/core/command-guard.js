@@ -1,9 +1,12 @@
-const SHELL_META_RE = /[;&|><`$]|\$\(|\r|\n/;
+// % и ^ — для cmd.exe (Windows): %VAR% подставляет переменные окружения (утечка ключей
+// в git commit -m "%GEMINI_API_KEY%"), ^ экранирует остальные метасимволы.
+const SHELL_META_RE = /[;&|><`$%^]|\$\(|\r|\n/;
 
 const SAFE_PATTERNS = [
     /^npm\s+(install|i|ci|test|t)(\s+--ignore-scripts)?$/,
     /^npm\s+run\s+(test|lint|build|check)$/,
     /^node\s+--test(\s+[a-zA-Z0-9_.\-\/]+)*$/,
+    /^node\s+--check\s+[a-zA-Z0-9_.\-\/]+$/, // только проверка синтаксиса, код не выполняется
     /^git\s+(status|diff|log|branch|add\s+\.|add\s+-A)$/,
     /^git\s+commit\s+-m\s+"[^"$`\\]+"$/,
     /^git\s+commit\s+-m\s+'[^']+'$/

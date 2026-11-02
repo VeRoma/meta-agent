@@ -287,10 +287,8 @@ export async function applyRedoPatches(targetProject) {
     return true;
 }
 
-export function clearSessionBackups() {
-    const configPath = path.join(process.cwd(), "meta.config.json");
-    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    const { backupDir } = getPaths(config.workspace.targetProject);
+export function clearSessionBackups(targetProject) {
+    const { backupDir } = getPaths(targetProject);
 
     if (!fs.existsSync(backupDir)) return;
 

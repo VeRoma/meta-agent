@@ -1,15 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import { askModel } from './llm.js';
+import { config } from '../config.js';
 
-// Функция, которая динамически вычисляет путь к памяти текущего проекта
+// Путь к памяти вычисляется при каждом вызове: целевой проект может смениться в рантайме
 function getSessionFile() {
-    const configPath = path.join(process.cwd(), 'meta.config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const targetProjectAbs = path.resolve(process.cwd(), config.workspace.targetProject);
-    
-    // Меняем папку на .meta-agent для независимой памяти
-    const metaAgentDir = path.join(targetProjectAbs, '.meta-agent');
+    // Папка .meta-agent — независимая от dev-agent память
+    const metaAgentDir = path.join(config.workspace.targetProject, '.meta-agent');
     
     if (!fs.existsSync(metaAgentDir)) {
         fs.mkdirSync(metaAgentDir, { recursive: true });
