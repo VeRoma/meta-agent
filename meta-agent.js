@@ -3,6 +3,23 @@ import path from 'path';
 import { listAvailableModels, pickProvider } from '@veroma/ai-core';
 import { acquireProjectLock } from '@veroma/ai-core/lock';
 
+// ARCHIVED: merged into dev-agent (self-improvement = project "self" there, in a git worktree).
+// The target here is ../dev-agent itself, so running this would edit the running dev-agent copy
+// directly, bypassing the worktree. Refuse unless explicitly forced.
+if (process.env.META_AGENT_LEGACY !== '1') {
+    console.error([
+        '',
+        '📦 meta-agent в архиве: его возможности перенесены в dev-agent (../dev-agent).',
+        '   • надзор за самим агентом — проект "self" (меню 0, /self, /p self в Telegram);',
+        '   • оркестратор, теги @ds/@ge/@claude, /audit, проверка моделей — там же;',
+        '   • просмотр правок агента над собой — /self-diff.',
+        '   Запуск отклонён: meta-agent правил бы рабочую копию dev-agent напрямую, в обход worktree.',
+        '   (Если это действительно нужно: META_AGENT_LEGACY=1.)',
+        '',
+    ].join('\n'));
+    process.exit(1);
+}
+
 let config;
 try {
     ({ config } = await import('./src/config.js'));
