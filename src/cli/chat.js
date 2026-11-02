@@ -8,27 +8,59 @@ import { getSession, initSession, clearSession } from "../core/session.js";
 import { generateDocumentation } from '../fs/docs-generator.js';
 import { abortSessionPatches, clearSessionBackups, applyRedoPatches } from '../fs/patcher.js';
 import { processAgentTask, startTargetServer, stopTargetServer } from '../core/task-runner.js';
-import { setConfirmHandler, setIdleHandler } from '../core/io.js';
+import { setConfirmHandler, setExclusiveRunner } from '../core/io.js';
 
 // Интерфейс: ввод, команды, подтверждения. Вся логика задачи — в core/task-runner.js.
+//
+// Все строки ввода приходят в ОДИН обработчик (rl.on('line')): если агент ждёт подтверждения,
+// строка — ответ на него; если агент занят, новая задача не принимается. С rl.question так нельзя:
+// пока ждёт приглашение «>>», второй вопрос (подтверждение из фоновой авто-починки) игнорируется,
+// и ответ «y» уходил агенту как новая задача.
 
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
 });
+rl.setPrompt('>> ');
 
-function askConfirm(question) {
+let pendingConfirm = null; // resolve ожидающего подтверждения
+let busy = false;          // агент выполняет задачу (из чата или авто-исправление)
+let closed = false;
+
+function showPrompt() {
+    if (closed) return;
+    process.stdout.write('\n');
+    rl.prompt();
+}
+
+function askConfirm(question, { whenNoTerminal = false } = {}) {
     if (!process.stdin.isTTY) {
-        console.log('⛔ Нет интерактивного терминала — действие отклонено автоматически.');
-        return Promise.resolve(false);
+        console.log(whenNoTerminal
+            ? '🤖 Нет интерактивного терминала — выполняю без подтверждения.'
+            : '⛔ Нет интерактивного терминала — действие отклонено автоматически.');
+        return Promise.resolve(whenNoTerminal);
     }
     return new Promise((resolve) => {
-        rl.question(question, (answer) => resolve(/^(y|yes|д|да)$/i.test(answer.trim())));
+        pendingConfirm = resolve;
+        process.stdout.write(question);
     });
 }
 
+/** Задача агента: никогда не две одновременно; после неё снова приглашение. */
+async function runExclusive(task) {
+    if (busy) return false;
+    busy = true;
+    try {
+        await task();
+    } finally {
+        busy = false;
+        showPrompt();
+    }
+    return true;
+}
+
 setConfirmHandler(askConfirm);
-setIdleHandler(() => rl.prompt());
+setExclusiveRunner(runExclusive);
 
 const COMMANDS_HELP = "/audit, /run, /stop, /save, /index, /abort, /redo, /clear, /editor, /push";
 
@@ -134,30 +166,52 @@ function readFromEditor() {
     return editorText;
 }
 
+async function handleInput(text) {
+    if (text === "/stop") {
+        stopTargetServer();
+    } else if (text === "/run") {
+        startTargetServer();
+    } else if (text === "/editor") {
+        const editorText = readFromEditor();
+        if (editorText) await processAgentTask(editorText);
+    } else if (text.startsWith("/")) {
+        await handleCommand(text);
+    } else {
+        await processAgentTask(text);
+    }
+}
+
 function chatLoop() {
-    rl.question('\n>> ', async (answer) => {
-        let text = answer.trim();
+    rl.on('line', (line) => {
+        const text = line.trim();
+
+        if (pendingConfirm) {
+            const resolve = pendingConfirm;
+            pendingConfirm = null;
+            resolve(/^(y|yes|д|да)$/i.test(text));
+            return;
+        }
 
         if (text.toLowerCase() === "exit" || text.toLowerCase() === "quit") {
             console.log("👋 Надзиратель отключается. До связи!");
             stopTargetServer();
+            closed = true;
             rl.close();
             return;
         }
 
-        if (text === "/stop") {
-            stopTargetServer();
-        } else if (text === "/run") {
-            startTargetServer();
-        } else if (text === "/editor") {
-            const editorText = readFromEditor();
-            if (editorText) await processAgentTask(editorText);
-        } else if (text.startsWith("/")) {
-            await handleCommand(text);
-        } else if (text) {
-            await processAgentTask(text);
+        if (busy) {
+            if (text) console.log('⏳ Агент занят текущей задачей. Дождитесь завершения (или exit для выхода).');
+            return;
         }
 
-        chatLoop();
+        if (!text) {
+            showPrompt();
+            return;
+        }
+
+        runExclusive(() => handleInput(text));
     });
+    rl.on('close', () => { closed = true; });
+    showPrompt();
 }

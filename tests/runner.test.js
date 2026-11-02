@@ -1,0 +1,54 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { runDevServer, stopDevServer, isNodeCrashOutput, isJavaStartupFailure } from '../src/cli/runner.js';
+
+function makeProject(devScript) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-agent-runner-'));
+    fs.writeFileSync(path.join(dir, 'app.js'), devScript);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 't', scripts: { dev: 'node app.js' } }));
+    return dir;
+}
+
+/** Запускает «dev-сервер» и ждёт, пока он сам завершится или пройдёт timeoutMs. */
+function runAndCollect(dir, { timeoutMs = 8000, stopAfterMs = null } = {}) {
+    return new Promise((resolve) => {
+        const crashes = [];
+        runDevServer(dir, (log) => crashes.push(log));
+        if (stopAfterMs) setTimeout(() => stopDevServer(), stopAfterMs);
+        // ждём завершения: runner обнуляет процесс в 'close'
+        setTimeout(() => resolve(crashes), timeoutMs);
+    });
+}
+
+test('runner: words like "error" / "0 failed" in normal output do NOT trigger auto-fix', async () => {
+    const dir = makeProject(`console.log('errorHandler ready; 0 failed; Exception filter on'); console.error('error: just a log line');`);
+    const crashes = await runAndCollect(dir, { timeoutMs: 5000 });
+    assert.deepEqual(crashes, []);
+});
+
+test('runner: a non-zero exit IS a crash, and the model gets the output tail', async () => {
+    const dir = makeProject(`console.log('booting'); throw new Error('boom in app.js');`);
+    const crashes = await runAndCollect(dir, { timeoutMs: 6000 });
+    assert.equal(crashes.length, 1);
+    assert.match(crashes[0], /boom in app\.js/);
+});
+
+test('runner: stopping via /stop is not a crash', async () => {
+    const dir = makeProject(`setInterval(() => {}, 1000);`);
+    const crashes = await runAndCollect(dir, { timeoutMs: 5000, stopAfterMs: 2000 });
+    assert.deepEqual(crashes, []);
+});
+
+test('runner: crash markers for nodemon and Spring Boot', () => {
+    assert.ok(isNodeCrashOutput('[nodemon] app crashed - waiting for file changes before starting...'));
+    assert.ok(!isNodeCrashOutput('error: request failed, retrying'));
+
+    assert.ok(isJavaStartupFailure('***************************\nAPPLICATION FAILED TO START\n***************************'));
+    assert.ok(isJavaStartupFailure('[INFO] BUILD FAILURE'));
+    assert.ok(isJavaStartupFailure('Exception in thread "main" java.lang.IllegalStateException'));
+    assert.ok(!isJavaStartupFailure('ERROR 1234 --- [nio-8080-exec-1] o.a.c.c.C.[.[.[/] : Servlet.service() threw exception'),
+        'a handled request error is not a startup failure');
+});

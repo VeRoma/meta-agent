@@ -2,9 +2,32 @@ import { spawn, execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
+const OUTPUT_TAIL = 8000;   // сколько последнего вывода держать для модели
 let currentProcess = null;
-let lastErrorAt = 0; // антиспам: не дёргаем авто-исправление чаще, чем раз в 5 секунд
+let lastErrorAt = 0;        // антиспам: не дёргаем авто-исправление чаще, чем раз в 5 секунд
 let logTailInterval = null;
+
+// Падение, а не просто слово «error» в логе: строка обработанной ошибки, «0 failed»
+// или логгер с errorHandler не должны запускать правку кода.
+const NODE_CRASH_RE = /\[nodemon\] app crashed/i;
+const JAVA_STARTUP_FAILURE_RE = /APPLICATION FAILED TO START|BUILD FAILURE|Error starting ApplicationContext|Exception in thread "main"/;
+
+/** nodemon и подобные не завершаются при падении приложения, а ждут изменений — это тоже падение. */
+export function isNodeCrashOutput(text) {
+    return NODE_CRASH_RE.test(text);
+}
+
+/** Spring Boot / Maven: только признаки того, что приложение не поднялось. */
+export function isJavaStartupFailure(text) {
+    return JAVA_STARTUP_FAILURE_RE.test(text);
+}
+
+function reportCrash(onErrorCallback, log) {
+    const now = Date.now();
+    if (now - lastErrorAt <= 5000) return;
+    lastErrorAt = now;
+    onErrorCallback(log.slice(-OUTPUT_TAIL));
+}
 
 export function runDevServer(targetPath, onErrorCallback) {
     if (currentProcess) {
@@ -34,24 +57,6 @@ export function runDevServer(targetPath, onErrorCallback) {
 
     console.log(`\n🚀 Запускаю процесс в: ${runPath}`);
 
-    const processOutput = (data) => {
-        const output = data.toString();
-        process.stdout.write(`[TARGET] ${output}`);
-        
-        const lowerOutput = output.toLowerCase();
-        if ((lowerOutput.includes('error') && !lowerOutput.includes('0 errors')) || 
-            lowerOutput.includes('failed') || 
-            lowerOutput.includes('exception') || 
-            lowerOutput.includes('build failure')) {
-            
-            const now = Date.now();
-            if (now - lastErrorAt > 5000) {
-                lastErrorAt = now;
-                onErrorCallback(output);
-            }
-        }
-    };
-
     if (isJava) {
         // --- РЕЖИМ JAVA (SPRING BOOT) ---
         try {
@@ -60,8 +65,9 @@ export function runDevServer(targetPath, onErrorCallback) {
 
         console.log("⚙️ Выполняю start.ps1...");
         execSync('powershell -ExecutionPolicy Bypass -File .\\start.ps1', { cwd: runPath });
-        
+
         currentProcess = { isJava: true, runPath };
+        let log = '';
 
         // Ищем свежий лог-файл (server_*.log)
         setTimeout(() => {
@@ -69,14 +75,19 @@ export function runDevServer(targetPath, onErrorCallback) {
             if (files.length > 0) {
                 const latestLog = path.join(runPath, files.sort().reverse()[0]);
                 let lastSize = fs.statSync(latestLog).size;
-                
+
                 logTailInterval = setInterval(() => {
                     if (!fs.existsSync(latestLog)) return;
                     const currentSize = fs.statSync(latestLog).size;
-                    
+
                     if (currentSize > lastSize) {
                         const stream = fs.createReadStream(latestLog, { start: lastSize, end: currentSize });
-                        stream.on('data', (chunk) => processOutput(chunk));
+                        stream.on('data', (chunk) => {
+                            const output = chunk.toString();
+                            process.stdout.write(`[TARGET] ${output}`);
+                            log = (log + output).slice(-OUTPUT_TAIL);
+                            if (isJavaStartupFailure(output)) reportCrash(onErrorCallback, log);
+                        });
                         lastSize = currentSize;
                     }
                 }, 1000);
@@ -86,7 +97,7 @@ export function runDevServer(targetPath, onErrorCallback) {
     } else {
         // --- РЕЖИМ NODE.JS ---
         let runCmd = 'dev'; // Значение по умолчанию
-        
+
         const pkgPath = path.join(runPath, 'package.json');
         if (fs.existsSync(pkgPath)) {
             try {
@@ -101,15 +112,32 @@ export function runDevServer(targetPath, onErrorCallback) {
                 console.log("⚠️ Ошибка чтения package.json целевого проекта");
             }
         }
-        
+
         console.log(`⚙️ Выполняю npm run ${runCmd}...`);
-        
+
         const child = spawn('npm', ['run', runCmd], { cwd: runPath, shell: true });
         currentProcess = child;
-        child.stdout.on('data', processOutput);
-        child.stderr.on('data', processOutput);
-        // Обнуляем только если это всё ещё ТЕКУЩИЙ процесс (после рестарта старый закрывается позже нового)
-        child.on('close', () => { if (currentProcess === child) currentProcess = null; });
+        let log = '';
+
+        const onOutput = (data) => {
+            const output = data.toString();
+            process.stdout.write(`[TARGET] ${output}`);
+            log = (log + output).slice(-OUTPUT_TAIL);
+            if (isNodeCrashOutput(output)) reportCrash(onErrorCallback, log);
+        };
+        child.stdout.on('data', onOutput);
+        child.stderr.on('data', onOutput);
+
+        child.on('close', (code) => {
+            // Обнуляем только если это всё ещё ТЕКУЩИЙ процесс (после рестарта старый закрывается позже нового)
+            if (currentProcess === child) currentProcess = null;
+            // Остановка через /stop или рестарт — не падение (taskkill тоже даёт ненулевой код)
+            if (child.stoppedByAgent) return;
+            if (code !== 0 && code !== null) {
+                console.log(`\n💥 Целевой процесс завершился с кодом ${code}.`);
+                reportCrash(onErrorCallback, log);
+            }
+        });
     }
 }
 
@@ -122,6 +150,7 @@ export function stopDevServer() {
             } catch(e) {}
             if (logTailInterval) { clearInterval(logTailInterval); logTailInterval = null; }
         } else {
+            currentProcess.stoppedByAgent = true;
             if (process.platform === 'win32') {
                 spawn("taskkill", ["/pid", currentProcess.pid, '/f', '/t']);
             } else {

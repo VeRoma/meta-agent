@@ -9,26 +9,26 @@ import { buildPrompt } from './prompt.js';
 import { askAgent } from './executor.js';
 import { runCommands } from './commands.js';
 import { runProjectChecks } from './checks.js';
-import { notifyIdle } from './io.js';
+import { confirm, runExclusive } from './io.js';
 
 const MAX_HEALING_ATTEMPTS = 3; // сколько раз агент может исправлять собственные ошибки
 const MAX_AUTO_DEPTH = 3;       // сколько раз подряд система сама подгружает файлы по просьбе агента
 
 const TARGET_CRASH_PROMPT = "[SYSTEM ERROR] Целевой процесс упал с ошибкой. Проанализируй лог, найди проблемный файл и сгенерируй патч:";
 
-let autoFixInProgress = false;
-
-async function onTargetCrash(errorLog) {
-    if (autoFixInProgress) return;
-    autoFixInProgress = true;
-    try {
-        console.log(`\n🚨 ВНИМАНИЕ: Целевой процесс упал с ошибкой! Передаю на авто-исправление...`);
+/** Падение целевого процесса: с согласия разработчика (без терминала — сразу) агент пытается исправить код. */
+export async function onTargetCrash(errorLog) {
+    const started = await runExclusive(async () => {
+        console.log(`\n🚨 ВНИМАНИЕ: Целевой процесс упал с ошибкой!`);
+        const approved = await confirm('🔧 Передать лог агенту на авто-исправление? (y/N): ', { whenNoTerminal: true });
+        if (!approved) {
+            console.log('⏭️ Авто-исправление пропущено.');
+            return;
+        }
         await processAgentTask(`${TARGET_CRASH_PROMPT}\n\n${String(errorLog).slice(-4000)}`);
         console.log('\n✅ Попытка исправления завершена.');
-    } finally {
-        autoFixInProgress = false;
-        notifyIdle();
-    }
+    });
+    if (!started) console.log('\n⚠️ Целевой процесс упал, но агент занят другой задачей — авто-исправление пропущено.');
 }
 
 /** Запускает целевой проект под надзором: при падении агент пытается исправить код. */

@@ -11,9 +11,9 @@ process.env.DEEPSEEK_API_KEY = 'test-key';
 process.env.CLAUDE_API_KEY = 'test-key';
 
 const { config, setTargetProject } = await import('../src/config.js');
-const { processAgentTask } = await import('../src/core/task-runner.js');
+const { processAgentTask, onTargetCrash } = await import('../src/core/task-runner.js');
 const { initSession, getSession } = await import('../src/core/session.js');
-const { setConfirmHandler } = await import('../src/core/io.js');
+const { setConfirmHandler, setExclusiveRunner } = await import('../src/core/io.js');
 
 const realFetch = globalThis.fetch;
 test.after(() => { globalThis.fetch = realFetch; });
@@ -172,4 +172,34 @@ test('e2e /audit: a full audit is never given to the fast tier', async () => {
     await processAgentTask('audit everything', 0, [], { forceFullAudit: true });
 
     assert.deepEqual(log.executor.map(p => p.provider), ['gemini']);
+});
+
+test('e2e crash: the developer is asked first; "no" means nothing is sent to the model', async () => {
+    makeProject({ 'a.js': 'export const a = 1;\n' });
+    const log = mockNetwork({ orchestrator: decision({}), executor: () => JSON.stringify({ mode: 'chat', message: 'Починил' }) });
+    const questions = [];
+
+    setConfirmHandler(async (q) => { questions.push(q); return false; });
+    await onTargetCrash('TypeError: boom\n    at a.js:1:1');
+    assert.equal(questions.length, 1);
+    assert.equal(log.orchestratorCalls + log.executor.length, 0, 'declined: no LLM calls');
+
+    setConfirmHandler(async () => true);
+    await onTargetCrash('TypeError: boom\n    at a.js:1:1');
+    assert.equal(log.executor.length, 1);
+    assert.ok(log.executor[0].prompt.includes('TypeError: boom'), 'the crash log reaches the model');
+});
+
+test('e2e crash: while the agent is busy with another task, auto-fix is skipped (never two tasks at once)', async () => {
+    makeProject({ 'a.js': 'export const a = 1;\n' });
+    const log = mockNetwork({ orchestrator: decision({}), executor: () => JSON.stringify({ mode: 'chat', message: 'x' }) });
+    setConfirmHandler(async () => true);
+    setExclusiveRunner(async () => false); // интерфейс сообщает: агент занят
+
+    try {
+        await onTargetCrash('boom');
+    } finally {
+        setExclusiveRunner(async (task) => { await task(); return true; });
+    }
+    assert.equal(log.executor.length, 0);
 });
