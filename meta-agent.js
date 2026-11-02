@@ -1,10 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import { listAvailableModels, pickProvider } from '@veroma/ai-core';
+import { acquireProjectLock } from './src/core/instance-lock.js';
 
-let config, AGENT_ROOT;
+let config;
 try {
-    ({ config, AGENT_ROOT } = await import('./src/config.js'));
+    ({ config } = await import('./src/config.js'));
 } catch (e) {
     console.error(`❌ ${e.message}`);
     process.exit(1);
@@ -62,10 +63,16 @@ async function initMetaAgent() {
     const metaAgentDir = path.join(absoluteTargetPath, '.meta-agent');
     const projectName = path.basename(absoluteTargetPath);
     const { buildProjectMap } = await import('./src/fs/map-builder.js');
+    const isFirstRun = !fs.existsSync(metaAgentDir);
 
-    if (!fs.existsSync(metaAgentDir)) {
+    const lock = acquireProjectLock(metaAgentDir);
+    if (!lock.ok) {
+        console.error(`❌ С проектом ${projectName} уже работает другой Meta-Agent (pid ${lock.pid}). Дождитесь его завершения.`);
+        process.exit(1);
+    }
+
+    if (isFirstRun) {
         console.log(`\n✨ Инициализация надзора за проектом: ${projectName}`);
-        fs.mkdirSync(metaAgentDir, { recursive: true });
 
         console.log('📚 Подготавливаю аналитический контекст...');
         try {
@@ -86,16 +93,13 @@ async function initMetaAgent() {
     // Передаем управление в Chat Loop
     const { startCLI } = await import('./src/cli/chat.js');
 
-    // Задача от Telegram-бота (meta-bot пишет её в файл и запускает агента)
-    const taskFilePath = path.join(AGENT_ROOT, 'meta_task.txt');
-    if (fs.existsSync(taskFilePath)) {
-        const taskText = fs.readFileSync(taskFilePath, 'utf-8').trim();
-        if (taskText) {
-            console.log('📥 Обнаружена директива от Telegram-бота! Передаю Meta-Agent...');
-            fs.unlinkSync(taskFilePath);
-            startCLI(taskText);
-            return;
-        }
+    // Задача от Telegram-бота приходит в окружении только этого процесса:
+    // ручной запуск никогда не подхватит чужую задачу
+    const taskText = process.env.META_TASK?.trim();
+    if (taskText) {
+        console.log('📥 Обнаружена директива от Telegram-бота! Передаю Meta-Agent...');
+        startCLI(taskText);
+        return;
     }
 
     // Запуск обычного ручного режима

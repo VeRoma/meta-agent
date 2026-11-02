@@ -3,8 +3,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const TelegramBot = require('node-telegram-bot-api');
-const { exec } = require('child_process');
-const fs = require('fs');
+const { execFile } = require('child_process');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const MY_CHAT_ID = Number(process.env.TELEGRAM_CHAT_ID);
@@ -14,7 +13,12 @@ if (!TOKEN || !MY_CHAT_ID) {
     process.exit(1);
 }
 
+const agentDir = path.join(__dirname, '..'); // Корневая папка meta-agent
 const bot = new TelegramBot(TOKEN, { polling: true });
+
+// Одна задача за раз: два агента на одном проекте перезаписывали бы файлы друг друга.
+// Если агент уже открыт в терминале, его откажет запускать lock-файл в .meta-agent.
+let taskRunning = false;
 
 console.log('🤖 Meta-Bot запущен и слушает Telegram...');
 
@@ -30,20 +34,24 @@ bot.on('message', (msg) => {
     const taskText = msg.text;
     if (!taskText) return;
 
-    const devBotDir = __dirname;
-    const agentDir = path.join(devBotDir, '..'); // Корневая папка meta-agent
+    if (taskRunning) {
+        bot.sendMessage(chatId, '⏳ Предыдущая директива ещё выполняется. Дождитесь ответа.');
+        return;
+    }
 
     // === СТАНДАРТНОЕ ТЗ ДЛЯ META-AGENT ===
+    taskRunning = true;
     bot.sendMessage(chatId, `⏳ Принял директиву. Запускаю Аудитора...`);
-    
-    const taskFilePath = path.join(agentDir, 'meta_task.txt');
-    fs.writeFileSync(taskFilePath, taskText);
 
-    // Запускаем Агента (он сам прочитает meta_task.txt и свою цель из meta.config.json).
+    // Задача — в окружение только этого процесса (не в общий файл), без shell.
     // В этом режиме нет терминала для подтверждений: команды вне белого списка отклоняются.
-    const command = `node meta-agent.js`;
-
-    exec(command, { cwd: agentDir, timeout: 10 * 60 * 1000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(process.execPath, ['meta-agent.js'], {
+        cwd: agentDir,
+        env: { ...process.env, META_TASK: taskText },
+        timeout: 10 * 60 * 1000,
+        maxBuffer: 10 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+        taskRunning = false;
         let response = '';
 
         if (error) response += `❌ Ошибка:\n${error.message}\n\n`;
@@ -51,7 +59,7 @@ bot.on('message', (msg) => {
         if (stdout) response += `✅ Лог Meta-Agent:\n${stdout}`;
 
         if (response.length > 4000) {
-            response = "..." + response.substring(response.length - 3900); 
+            response = "..." + response.substring(response.length - 3900);
         }
 
         bot.sendMessage(chatId, response || 'Аудит завершен, логов нет.');
